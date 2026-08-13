@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python
+.python-version
+.venv/
+__pycache__/
+
+# Build artefacts
+build/
+dist/
+
+# Bundled timew binary (compiled by build_dmg.sh)
+timew
+
+# Temporary icon variants and check files
+icon_alt_*.png
+icon_check.png
+
+junk/
