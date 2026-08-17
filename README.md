@@ -34,8 +34,13 @@ The **Show Reports…** menu entry opens a companion window with graphical summa
 
 ## Requirements
 
+When running as standalone python script, we need:
+
 - macOS
-- Python 3 with the `rumps` library installed (e.g., `pip install rumps`)
+- Python 3 with the `rumps` library installed (e.g., `pip3 install rumps`)
+- TimeWarrior `timew` command in PATH
+
+When installed as macOS .app bundle from  drag-and-drop .dmg installer, all requirements should be satisfied from the image.
 
 ## Running from the terminal
 
@@ -48,6 +53,8 @@ python3 arete.py
 To package Arête as a standalone macOS `.app` bundle inside a drag-and-drop `.dmg` installer, just run:
 
 ```
+git clone git clone https://github.com/janfrode/Arete.git
+cd Arete
 make
 ```
 
