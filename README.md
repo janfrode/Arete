@@ -75,7 +75,7 @@ Arête includes a fully native **Preferences & About** window (available via **P
 
 - **Pause on screen lock**: When enabled, stops tracking when the screen locks, and resumes tracking active tags when unlocked. (Saves to `"pause_on_lock"`).
 - **Start at login**: Dynamically registers or removes `Arete.app` from the macOS *System Settings → General → Login Items* list via AppleScript. (Visible only when running the packaged `.app` bundle.)
-- **Recent tags range**: Specifies the range passed to `timew tags <range>` to select which tags are displayed directly in the primary menu (e.g., `":month"`, `":week"`, or `"from 2026-08-01"`). (Saves to `"recent_range"`).
+- **Recent tags range**: Specifies the range passed to `timew tags <range>` to select which tags are displayed directly in the primary menu (e.g., `":month"`, `":week"`, `":fortnight"` or `"from 2026-08-01"`). (Saves to `"recent_range"`).
 
 All user preferences (except login registration which is managed via macOS System Events) are persistently saved to `~/.arete.json`:
 
