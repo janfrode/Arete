@@ -117,7 +117,7 @@ def get_icon_path():
 def is_login_item_enabled():
     """Check if the app is currently in the macOS login items list."""
     try:
-        cmd = 'tell application "System Events" to get count of (every login item whose name is "Arête")'
+        cmd = 'tell application "System Events" to get count of (every login item whose name is "Arete")'
         result = subprocess.run(["osascript", "-e", cmd], capture_output=True, text=True, check=True)
         return result.stdout.strip() != "0"
     except Exception:
@@ -130,11 +130,11 @@ def set_login_item_enabled(enabled, app_path):
         return
     try:
         # Always clean up existing items first to avoid duplicates
-        delete_cmd = 'tell application "System Events" to delete (every login item whose name is "Arête")'
+        delete_cmd = 'tell application "System Events" to delete (every login item whose name is "Arete")'
         subprocess.run(["osascript", "-e", delete_cmd], capture_output=True, check=True)
         
         if enabled:
-            add_cmd = f'tell application "System Events" to make new login item at end with properties {{path:"{app_path}", name:"Arête", hidden:false}}'
+            add_cmd = f'tell application "System Events" to make new login item at end with properties {{path:"{app_path}", name:"Arete", hidden:false}}'
             subprocess.run(["osascript", "-e", add_cmd], capture_output=True, check=True)
     except Exception as e:
         print(f"Error setting login item: {e}")
