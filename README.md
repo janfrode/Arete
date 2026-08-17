@@ -55,8 +55,7 @@ The script is fully self-contained: it creates an isolated virtual environment, 
 
 This generates a mountable `dist/Arete.dmg` containing the application and a shortcut to the macOS `Applications` directory for effortless drag-and-drop installation.
 
-> [!NOTE]
-> **Gatekeeper / Security Warning**: Because the built application is unsigned, macOS security may block it from launching the first time with an "unidentified developer" warning. To run it, open macOS **System Settings**, go to **Privacy & Security**, scroll down to the *Security* section, and click **Open Anyway**.
+Precompiled [Arete dmg](Arete.dmg) is available from [https://tanso.net/Arete.dmg](https://tanso.net/Arete.dmg). but beware that this is not signed, and macOS security may block it from launching the first time with an "unidentified developer" warning. To run it, open macOS **System Settings**, go to **Privacy & Security**, scroll down to the *Security* section, and click **Open Anyway**.
 
 ## How it works
 
