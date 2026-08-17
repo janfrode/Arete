@@ -47,11 +47,11 @@ python3 arete.py
 
 To package Arête as a standalone macOS `.app` bundle inside a drag-and-drop `.dmg` installer, just run:
 
-```sh
-./build_dmg.sh
+```
+make
 ```
 
-The script is fully self-contained: it creates an isolated virtual environment, installs all build dependencies (`py2app`, `rumps`, `pyobjc`, …) into it, compiles TimeWarrior from source, and bundles everything — including the Python interpreter — inside the `.app`. No prior `pip install` is needed.
+The script is fully self-contained: it creates an isolated virtual environment, installs all build dependencies (`py2app`, `rumps`, `pyobjc`, …) into it, compiles TimeWarrior from source, and bundles everything — including the Python interpreter — inside the `.app`. No prior dependencies is needed.
 
 This generates a mountable `dist/Arete.dmg` containing the application and a shortcut to the macOS `Applications` directory for effortless drag-and-drop installation.
 
@@ -89,11 +89,11 @@ All user preferences (except login registration which is managed via macOS Syste
 ## Project layout
 
 ```
+Makefile            # Makefile for building timew binary, icons and DMG file.
 arete.py            # The applet (includes in-process reports window)
 timereport.py       # Graphical history reports viewer (loaded in-process by arete.py;
                     #   can also be run standalone: python3 timereport.py)
 setup.py            # macOS application packaging configuration
-build_dmg.sh        # Script to package the application as a DMG file
 generate_icon.py    # Script to programmatically generate the high-res macOS Arete.icns file
 README.md
 ```
