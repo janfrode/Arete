@@ -1282,7 +1282,23 @@ class TimeBar(rumps.App):
 
     def _toggle_tag(self, sender):
         tag = getattr(sender, "tag_name", sender.title)
-        self._toggle_tag_by_name(tag)
+        if sender.state:
+            # Tag is active — stop it
+            active = get_active_tags()
+            active.discard(tag)
+            if active:
+                # Other tags remain: re-start them (closes current interval → @2)
+                run("start", *sorted(active))
+                self._update_state()
+                self._prompt_annotate_if_needed("@2")
+            else:
+                self._stop_with_optional_prompt()
+        else:
+            had_active = bool(get_active_tags())
+            start_tag(tag)
+            self._update_state()
+            if had_active:
+                self._prompt_annotate_if_needed("@2")
 
     def _add_tag_clicked(self, sender):
         """Add the selected tag to the currently active set."""
@@ -1404,26 +1420,32 @@ class TimeBar(rumps.App):
         """Stop all tracking; optionally prompt for annotation afterwards."""
         run("stop")
         self._update_state()
-        if self._config.get("prompt_on_stop", False):
-            if getattr(self, "_annotate_controller", None):
-                return
-            # @1 is now the interval that was just stopped
-            existing = ""
-            tags_hint = ""
-            try:
-                out = run("export", "@1")
-                if out:
-                    data = json.loads(out)
-                    if data:
-                        existing = data[0].get("annotation", "")
-                        tags_hint = ", ".join(data[0].get("tags", []))
-            except Exception:
-                pass
-            self._annotate_controller = AnnotateWindow.alloc(
-            ).initWithApp_intervalId_existing_onSave_tagsHint_(
-                self, 1, existing, None, tags_hint
-            )
-            self._annotate_controller.show()
+        self._prompt_annotate_if_needed("@1")
+
+    def _prompt_annotate_if_needed(self, interval_ref):
+        """Open annotation dialog for *interval_ref* if prompt_on_stop is set."""
+        if not self._config.get("prompt_on_stop", False):
+            return
+        if getattr(self, "_annotate_controller", None):
+            return
+        existing = ""
+        tags_hint = ""
+        interval_id = 1
+        try:
+            out = run("export", interval_ref)
+            if out:
+                data = json.loads(out)
+                if data:
+                    existing = data[0].get("annotation", "")
+                    tags_hint = ", ".join(data[0].get("tags", []))
+                    interval_id = data[0].get("id", 1)
+        except Exception:
+            pass
+        self._annotate_controller = AnnotateWindow.alloc(
+        ).initWithApp_intervalId_existing_onSave_tagsHint_(
+            self, interval_id, existing, None, tags_hint
+        )
+        self._annotate_controller.show()
 
     def _stop_all(self, _):
         self._stop_with_optional_prompt()
