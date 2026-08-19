@@ -33,7 +33,7 @@ import objc
 
 
 CONFIG_PATH = os.path.expanduser("~/.arete.json")
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 
 def _make_menubar_icon():
@@ -352,6 +352,15 @@ class PreferencesWindow(NSObject):
         )
         stack.addView_inGravity_(self.chk_empty_days, 1)
 
+        self.chk_prompt_stop = NSButton.buttonWithTitle_target_action_(
+            "Prompt for annotation when stopping a task", self, None
+        )
+        self.chk_prompt_stop.setButtonType_(3)
+        self.chk_prompt_stop.setState_(
+            NSControlStateValueOn if self.app._config.get("prompt_on_stop", False) else NSControlStateValueOff
+        )
+        stack.addView_inGravity_(self.chk_prompt_stop, 1)
+
         # Form rows: label (fixed 200 px wide, right-aligned) + field
         LABEL_W = 210
 
@@ -447,6 +456,10 @@ class PreferencesWindow(NSObject):
             self.chk_empty_days.state() == NSControlStateValueOn
         )
 
+        self.app._config["prompt_on_stop"] = (
+            self.chk_prompt_stop.state() == NSControlStateValueOn
+        )
+
         save_config(self.app._config)
 
         self.window.close()
@@ -529,6 +542,102 @@ class NewTagWindow(NSObject):
         if tag:
             start_tag(tag)
             self.app._update_state()
+
+
+class AnnotateWindow(NSObject):
+    """Dialog for adding or editing an annotation on a timew interval.
+
+    interval_id : int — the timew @id to annotate (1 = most recent)
+    existing    : str — pre-fill text (empty string for new annotations)
+    on_save     : optional callable() invoked after a successful save
+    tags_hint   : optional str shown in the subtitle (e.g. "dmi, work")
+    """
+
+    def initWithApp_intervalId_existing_onSave_tagsHint_(
+            self, app, interval_id, existing, on_save, tags_hint):
+        self = objc.super(AnnotateWindow, self).init()
+        if self is None:
+            return None
+        self.app = app
+        self._interval_id = interval_id
+        self._existing = existing or ""
+        self._on_save = on_save
+        self._tags_hint = tags_hint or ""
+        return self
+
+    def show(self):
+        style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(380, 140)),
+            style_mask,
+            NSBackingStoreBuffered,
+            False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_("Annotate Interval")
+        window.center()
+
+        stack = NSStackView.stackViewWithViews_([])
+        stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        stack.setSpacing_(10.0)
+        stack.setEdgeInsets_((20.0, 20.0, 20.0, 20.0))
+
+        # Label
+        lbl_text = f"Annotation for @{self._interval_id}"
+        if self._tags_hint:
+            lbl_text += f"  ({self._tags_hint})"
+        lbl = NSTextField.labelWithString_(lbl_text)
+        lbl.setFont_(NSFont.systemFontOfSize_(13))
+        stack.addView_inGravity_(lbl, 1)
+
+        # Text field
+        self.txt_annotation = NSTextField.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(340, 24))
+        )
+        self.txt_annotation.setPlaceholderString_("Describe what you worked on…")
+        self.txt_annotation.setStringValue_(self._existing)
+        stack.addView_inGravity_(self.txt_annotation, 1)
+
+        # Buttons
+        btn_stack = NSStackView.stackViewWithViews_([])
+        btn_stack.setSpacing_(8.0)
+
+        btn_cancel = NSButton.buttonWithTitle_target_action_("Cancel", self, "cancel:")
+        btn_cancel.setKeyEquivalent_("\x1b")
+
+        btn_save = NSButton.buttonWithTitle_target_action_("Save", self, "save:")
+        btn_save.setKeyEquivalent_("\r")
+
+        btn_stack.addView_inGravity_(btn_cancel, 3)
+        btn_stack.addView_inGravity_(btn_save, 3)
+        stack.addView_inGravity_(btn_stack, 3)
+
+        window.setContentView_(stack)
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        window.makeFirstResponder_(self.txt_annotation)
+
+    @objc.typedSelector(b"v@:@")
+    def cancel_(self, sender):
+        self.window.close()
+        self._cleanup()
+
+    @objc.typedSelector(b"v@:@")
+    def save_(self, sender):
+        text = self.txt_annotation.stringValue().strip()
+        self.window.close()
+        self._cleanup()
+        if text:
+            run("annotate", f"@{self._interval_id}", text)
+        if self._on_save:
+            self._on_save()
+
+    def _cleanup(self):
+        if self.app is not None:
+            self.app._annotate_controller = None
+
+
 
 
 def find_timew_path():
@@ -1119,6 +1228,9 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("New tag…", callback=self._new_tag))
         self.menu.add(rumps.MenuItem("Stop all", callback=self._stop_all))
+        annotate_item = rumps.MenuItem("Annotate active…", callback=self._annotate_active)
+        self._annotate_active_item = annotate_item
+        self.menu.add(annotate_item)
         self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
         self.menu.add(rumps.MenuItem("Show Reports...", callback=self._show_reports))
         self.menu.add(rumps.separator)
@@ -1141,12 +1253,45 @@ class TimeBar(rumps.App):
         from AppKit import NSEvent, NSEventModifierFlagOption
         tag = getattr(sender, "tag_name", sender.title)
         if sender.state:
-            stop_tag(tag)
+            active = get_active_tags()
+            active.discard(tag)
+            if active:
+                run("start", *sorted(active))
+                self._update_state()
+            else:
+                self._stop_with_optional_prompt()
         else:
             modifiers = NSEvent.modifierFlags()
             add_to_active = bool(modifiers & NSEventModifierFlagOption)
             start_tag(tag, add_to_active=add_to_active)
-        self._update_state()
+            self._update_state()
+
+    def _annotate_active(self, _):
+        """Open annotation dialog for the currently active interval (@1)."""
+        active = get_active_tags()
+        if not active:
+            return
+        if getattr(self, "_annotate_controller", None):
+            self._annotate_controller.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            return
+        tags_hint = ", ".join(sorted(active))
+        # Fetch existing annotation from the active interval (@1)
+        existing = ""
+        try:
+            out = run("export", "@1")
+            if out:
+                data = json.loads(out)
+                if data:
+                    existing = data[0].get("annotation", "")
+        except Exception:
+            pass
+        self._annotate_controller = AnnotateWindow.alloc(
+        ).initWithApp_intervalId_existing_onSave_tagsHint_(
+            self, 1, existing, self._update_state, tags_hint
+        )
+        self._annotate_controller.show()
+
 
     def _preferences(self, _):
         # If preferences window is already open, bring it to front
@@ -1218,9 +1363,33 @@ class TimeBar(rumps.App):
             self._locked_active_tags = set()
             self._update_state()
 
-    def _stop_all(self, _):
+    def _stop_with_optional_prompt(self):
+        """Stop all tracking; optionally prompt for annotation afterwards."""
         run("stop")
         self._update_state()
+        if self._config.get("prompt_on_stop", False):
+            if getattr(self, "_annotate_controller", None):
+                return
+            # @1 is now the interval that was just stopped
+            existing = ""
+            tags_hint = ""
+            try:
+                out = run("export", "@1")
+                if out:
+                    data = json.loads(out)
+                    if data:
+                        existing = data[0].get("annotation", "")
+                        tags_hint = ", ".join(data[0].get("tags", []))
+            except Exception:
+                pass
+            self._annotate_controller = AnnotateWindow.alloc(
+            ).initWithApp_intervalId_existing_onSave_tagsHint_(
+                self, 1, existing, None, tags_hint
+            )
+            self._annotate_controller.show()
+
+    def _stop_all(self, _):
+        self._stop_with_optional_prompt()
 
     def _refresh_tags(self, _):
         self._build_menu()
@@ -1255,6 +1424,11 @@ class TimeBar(rumps.App):
                         image_view.setImage_(img)
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
+
+        # Enable/disable "Annotate active…"
+        annotate_item = getattr(self, "_annotate_active_item", None)
+        if annotate_item:
+            annotate_item._menuitem.setEnabled_(bool(active))
 
         for tag, item in self._tag_items.items():
             item.state = tag in active

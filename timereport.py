@@ -173,6 +173,8 @@ def _parse_intervals(out):
             "end": end,
             "tags": item.get("tags", []),
             "duration": (end - start).total_seconds(),
+            "annotation": item.get("annotation", ""),
+            "id": item.get("id"),
         })
     return intervals
 
@@ -268,16 +270,17 @@ def _layout_row(ctx_intervals, y_base, row_h, graph_x0, graph_w, t_start, t_end)
             lanes[lane_idx] = inv["end"]
 
         draw_data.append((x0, x1, lane_idx, inv.get("tag", ""),
-                          inv["start"], inv["end"]))
+                          inv["start"], inv["end"],
+                          inv.get("annotation", ""), inv.get("id")))
 
     num_lanes = max(len(lanes), 1)
     lane_h = min(float(row_h - 2), float(row_h) / num_lanes)
 
     hits = []
-    for x0, x1, lane_idx, tag, start_dt, end_dt in draw_data:
+    for x0, x1, lane_idx, tag, start_dt, end_dt, annotation, interval_id in draw_data:
         y = y_base + lane_idx * lane_h + 1.0
         rect = NSRect(NSPoint(x0, y), NSSize(x1 - x0, lane_h - 1.0))
-        hits.append((rect, tag, start_dt, end_dt))
+        hits.append((rect, tag, start_dt, end_dt, annotation, interval_id))
     return hits
 
 
@@ -306,7 +309,7 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         frac = max(0.0, min(1.0, frac))
         return graph_x0 + frac * graph_w
 
-    for rect, tag, _s, _e in hits:
+    for rect, tag, _s, _e, _ann, _iid in hits:
         r_val = (rect.size.height - 1.0) / 2.0
         bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, r_val, r_val
@@ -447,7 +450,11 @@ def _paint_timeline(rows, tag_index, hour_start, hour_end, width, height,
             flat = []
             for inv in invs:
                 for tag in inv["tags"] or ["(untagged)"]:
-                    flat.append({"start": inv["start"], "end": inv["end"], "tag": tag})
+                    flat.append({
+                        "start": inv["start"], "end": inv["end"], "tag": tag,
+                        "annotation": inv.get("annotation", ""),
+                        "id": inv.get("id"),
+                    })
 
             hits = _draw_row(
                 flat, tag_index, y_base, rh,
@@ -608,7 +615,7 @@ class TimelineView(NSView):
     def mouseMoved_(self, event):
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
         tip = ""
-        for rect, tag, start_dt, end_dt in self._hit_rects:
+        for rect, tag, start_dt, end_dt, annotation, _iid in self._hit_rects:
             if NSPointInRect(pt, rect):
                 duration = (end_dt - start_dt).total_seconds()
                 tip = (
@@ -616,17 +623,65 @@ class TimelineView(NSView):
                     f"{start_dt.strftime('%-H:%M')}–{end_dt.strftime('%-H:%M')}  "
                     f"({seconds_to_hm(duration)})"
                 )
+                if annotation:
+                    tip += f"  📝 {annotation}"
                 break
         self.setToolTip_(tip)
 
+    def _hit_at_point(self, pt):
+        """Return the hit-rect tuple under *pt*, or None."""
+        for entry in self._hit_rects:
+            if NSPointInRect(pt, entry[0]):
+                return entry
+        return None
+
     def rightMouseDown_(self, event):
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        self._right_click_hit = self._hit_at_point(pt)
+
         menu = NSMenu.alloc().initWithTitle_("")
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+
+        annotate_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Annotate…", "annotateInterval:", ""
+        )
+        annotate_item.setTarget_(self)
+        annotate_item.setEnabled_(self._right_click_hit is not None)
+        menu.addItem_(annotate_item)
+
+        sep = NSMenuItem.separatorItem()
+        menu.addItem_(sep)
+
+        raw_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Show raw data", "showRawData:", ""
         )
-        item.setTarget_(self)
-        menu.addItem_(item)
+        raw_item.setTarget_(self)
+        menu.addItem_(raw_item)
         NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self)
+
+    @objc.typedSelector(b"v@:@")
+    def annotateInterval_(self, sender):
+        hit = getattr(self, "_right_click_hit", None)
+        if not hit:
+            return
+        _rect, tag, start_dt, end_dt, annotation, interval_id = hit
+        if interval_id is None:
+            return
+        tags_hint = tag
+        # Late import — arete is already in sys.modules when timereport runs
+        import sys as _sys
+        arete_mod = _sys.modules.get("arete") or _sys.modules.get("__main__")
+        AnnotateWindow = getattr(arete_mod, "AnnotateWindow", None)
+        run_fn = getattr(arete_mod, "run", None)
+        if AnnotateWindow is None or run_fn is None:
+            return
+        ctrl = AnnotateWindow.alloc(
+        ).initWithApp_intervalId_existing_onSave_tagsHint_(
+            None, interval_id, annotation,
+            lambda: self.setNeedsDisplay_(True),
+            tags_hint,
+        )
+        self._annotate_ctrl = ctrl  # keep alive
+        ctrl.show()
 
     @objc.typedSelector(b"v@:@")
     def showRawData_(self, sender):
@@ -636,24 +691,44 @@ class TimelineView(NSView):
         end_str    = (self._end_date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
         range_args = [start_str, "-", end_str]
 
+        export_out = run_timew("export", *range_args)
+        try:
+            data = json.loads(export_out) if export_out else []
+        except Exception:
+            data = []
+
         if self._filter_tags:
             # OR-filter: collect @ids of intervals that contain any selected tag
-            export_out = run_timew("export", *range_args)
-            try:
-                data = json.loads(export_out) if export_out else []
-            except Exception:
-                data = []
             ids = [
                 str(item["id"]) for item in data
                 if any(t in (item.get("tags") or []) for t in self._filter_tags)
             ]
             summary_args = ["summary"] + (["@" + i for i in ids] if ids else range_args)
             title = "timew summary — " + ", ".join(sorted(self._filter_tags))
+            annotated = [item for item in data
+                         if any(t in (item.get("tags") or []) for t in self._filter_tags)
+                         and item.get("annotation")]
         else:
             summary_args = ["summary"] + range_args
             title = "timew summary"
+            annotated = [item for item in data if item.get("annotation")]
 
         output = run_timew(*summary_args) or "(no tracked time)"
+
+        if annotated:
+            tz = local_tz()
+            lines = ["\n\nAnnotations:"]
+            lines.append("-" * 60)
+            for item in annotated:
+                try:
+                    start_dt = parse_utc(item["start"]).astimezone(tz)
+                    time_str = start_dt.strftime("%-d %b %Y  %-H:%M")
+                except Exception:
+                    time_str = item.get("start", "")
+                tags_str = ", ".join(item.get("tags") or [])
+                lines.append(f"{time_str}  [{tags_str}]  {item['annotation']}")
+            output += "\n".join(lines)
+
         self._summary_panel = SummaryOutputPanel.alloc().initWithText_title_(output, title)
 
     def acceptsFirstResponder(self):
