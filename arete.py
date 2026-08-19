@@ -373,7 +373,7 @@ class PreferencesWindow(NSObject):
             return lbl
 
         # Row: Recent tags range
-        recent_val = self.app._config.get("recent_range", ":month")
+        recent_val = self.app._config.get("recent_range", ":fortnight")
         display_val = recent_val[1:] if recent_val.startswith(":") else recent_val
         self.txt_range = NSTextField.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(100, 22)))
         self.txt_range.setStringValue_(display_val)
