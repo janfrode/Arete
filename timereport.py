@@ -663,7 +663,7 @@ class TimelineView(NSView):
         hit = getattr(self, "_right_click_hit", None)
         if not hit:
             return
-        _rect, tag, start_dt, end_dt, annotation, interval_id = hit
+        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit
         if interval_id is None:
             return
         tags_hint = tag
@@ -671,12 +671,22 @@ class TimelineView(NSView):
         import sys as _sys
         arete_mod = _sys.modules.get("arete") or _sys.modules.get("__main__")
         AnnotateWindow = getattr(arete_mod, "AnnotateWindow", None)
-        run_fn = getattr(arete_mod, "run", None)
-        if AnnotateWindow is None or run_fn is None:
+        if AnnotateWindow is None:
             return
+        # Re-fetch the current annotation from timew so _existing is always
+        # fresh (hit-rect value may be stale if the view hasn't been redrawn).
+        existing = ""
+        try:
+            out = run_timew("export", f"@{interval_id}")
+            if out:
+                data = json.loads(out)
+                if data:
+                    existing = data[0].get("annotation", "")
+        except Exception:
+            pass
         ctrl = AnnotateWindow.alloc(
         ).initWithApp_intervalId_existing_onSave_tagsHint_(
-            None, interval_id, annotation,
+            None, interval_id, existing,
             lambda: self.setNeedsDisplay_(True),
             tags_hint,
         )

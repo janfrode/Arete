@@ -628,7 +628,9 @@ class AnnotateWindow(NSObject):
         text = self.txt_annotation.stringValue().strip()
         self.window.close()
         self._cleanup()
-        if text:
+        # Always write if text is non-empty; also write (clears) if it was
+        # non-empty before and the user blanked it out.
+        if text or self._existing:
             run("annotate", f"@{self._interval_id}", text)
         if self._on_save:
             self._on_save()
