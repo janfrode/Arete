@@ -309,7 +309,14 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         frac = max(0.0, min(1.0, frac))
         return graph_x0 + frac * graph_w
 
-    for rect, tag, _s, _e, _ann, _iid in hits:
+    ANN_FONT_SIZE = 9.0
+    ann_font = NSFont.systemFontOfSize_(ANN_FONT_SIZE)
+    ann_attrs = {
+        NSFontAttributeName: ann_font,
+        NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+    }
+
+    for rect, tag, _s, _e, ann, _iid in hits:
         r_val = (rect.size.height - 1.0) / 2.0
         bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, r_val, r_val
@@ -320,6 +327,30 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         tag_color(cidx, 0.90).set()
         bar_path.setLineWidth_(1.0)
         bar_path.stroke()
+
+        # Draw annotation text inside the bar (near the top) when tall enough.
+        # AppKit y-up: rect.origin.y is the bottom, top = origin.y + height.
+        # Text baseline at origin.y + 2.0 keeps it visually inside the bar.
+        if ann and rect.size.height >= 14.0:
+            max_w = rect.size.width - 6.0
+            if max_w > 20.0:
+                ann_y = rect.origin.y + 2.0   # baseline just above bar bottom
+                lbl = NSString.stringWithString_(ann)
+                lbl_sz = lbl.sizeWithAttributes_(ann_attrs)
+                if lbl_sz.width > max_w:
+                    NSGraphicsContext.currentContext().saveGraphicsState()
+                    NSBezierPath.bezierPathWithRect_(
+                        NSRect(NSPoint(rect.origin.x + 3.0, ann_y - 1.0),
+                               NSSize(max_w, ANN_FONT_SIZE + 2.0))
+                    ).setClip()
+                    lbl.drawAtPoint_withAttributes_(
+                        NSPoint(rect.origin.x + 3.0, ann_y), ann_attrs
+                    )
+                    NSGraphicsContext.currentContext().restoreGraphicsState()
+                else:
+                    lbl.drawAtPoint_withAttributes_(
+                        NSPoint(rect.origin.x + 3.0, ann_y), ann_attrs
+                    )
 
     # "Now" indicator
     if now_dt and t_start <= now_dt <= t_end:
@@ -731,10 +762,10 @@ class TimelineView(NSView):
             lines.append("-" * 60)
             for item in annotated:
                 try:
-                    start_dt = parse_utc(item["start"]).astimezone(tz)
-                    time_str = start_dt.strftime("%-d %b %Y  %-H:%M")
+                    end_str = item.get("end") or item.get("start", "")
+                    time_str = parse_utc(end_str).astimezone(tz).strftime("%-d %b %Y  %-H:%M")
                 except Exception:
-                    time_str = item.get("start", "")
+                    time_str = item.get("end") or item.get("start", "")
                 tags_str = ", ".join(item.get("tags") or [])
                 lines.append(f"{time_str}  [{tags_str}]  {item['annotation']}")
             output += "\n".join(lines)
@@ -1149,6 +1180,125 @@ def build_summary_table(all_tags, tag_totals, grand_total, target_secs, tag_inde
 
 
 # ---------------------------------------------------------------------------
+# Annotations table
+# ---------------------------------------------------------------------------
+
+def build_annotations_table(intervals, tag_index):
+    """Return (NSView, height) listing all annotated intervals, sorted by time.
+
+    Columns: time | ● tag(s) | annotation text
+    Returns (None, 0) when there are no annotations in the period.
+    """
+    from AppKit import NSTextAlignmentLeft, NSGridCell
+
+    annotated = sorted(
+        [inv for inv in intervals if inv.get("annotation")],
+        key=lambda i: i["start"],
+    )
+    if not annotated:
+        return None, 0.0
+
+    FONT_SIZE = 11.0
+    ROW_H_A   = 18.0
+
+    def cell(text, bold=False, muted=False, color=None):
+        lbl = NSTextField.labelWithString_(text)
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(FONT_SIZE) if bold
+                     else NSFont.systemFontOfSize_(FONT_SIZE))
+        if color:
+            lbl.setTextColor_(color)
+        elif muted:
+            lbl.setTextColor_(NSColor.secondaryLabelColor())
+        lbl.setSelectable_(True)
+        return lbl
+
+    # Header
+    rows  = [[cell("Ended", bold=True),
+              cell("Tags", bold=True),
+              cell("Annotation", bold=True)]]
+    csv_rows = [["Ended", "Tags", "Annotation"]]
+
+    for inv in annotated:
+        time_str = inv["end"].strftime("%-d %b  %-H:%M")
+        tags     = inv.get("tags") or ["(untagged)"]
+        tags_str = ", ".join(tags)
+        ann      = inv["annotation"]
+
+        # Colour the first tag's dot
+        first_tag = tags[0]
+        cidx = tag_index.get(first_tag, 0)
+        r, g, b = _rgb(cidx)
+        dot_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0)
+
+        # Build a tags cell with coloured dot prefix
+        tags_cell = NSTextField.labelWithString_(f"● {tags_str}")
+        tags_cell.setFont_(NSFont.systemFontOfSize_(FONT_SIZE))
+        tags_cell.setTextColor_(dot_color)
+        tags_cell.setSelectable_(True)
+
+        ann_cell = NSTextField.labelWithString_(ann)
+        ann_cell.setFont_(NSFont.systemFontOfSize_(FONT_SIZE))
+        ann_cell.setSelectable_(True)
+
+        rows.append([cell(time_str, muted=True), tags_cell, ann_cell])
+        csv_rows.append([time_str, tags_str, ann])
+
+    num_rows = len(rows)
+    grid = NSGridView.gridViewWithNumberOfColumns_rows_(3, num_rows)
+    grid.setRowSpacing_(2.0)
+    grid.setColumnSpacing_(12.0)
+    grid.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+    for r_idx, row_cells in enumerate(rows):
+        for c_idx, view in enumerate(row_cells):
+            grid.cellAtColumnIndex_rowIndex_(c_idx, r_idx).setContentView_(view)
+
+    grid.columnAtIndex_(0).setWidth_(90.0)   # time
+    grid.columnAtIndex_(1).setWidth_(160.0)  # tags
+    grid.columnAtIndex_(2).setWidth_(500.0)  # annotation (stretches)
+
+    for r_idx in range(num_rows):
+        grid.rowAtIndex_(r_idx).setHeight_(ROW_H_A)
+    grid.rowAtIndex_(0).setBottomPadding_(4.0)
+
+    natural_h = (num_rows * ROW_H_A
+                 + grid.rowSpacing() * (num_rows - 1)
+                 + 4.0 + 2.0)
+    grid.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
+
+    # Section header label + grid stacked vertically
+    section_lbl = make_label("Annotations", size=11, bold=True, muted=True)
+    section_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+    wrapper = SummaryTableView.alloc().initWithGrid_csvRows_(grid, csv_rows)
+    wrapper.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    wrapper.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
+
+    SECTION_H = 18.0
+    GAP       = 4.0
+    total_h   = SECTION_H + GAP + natural_h
+
+    container = NSView.alloc().initWithFrame_(
+        NSRect(NSPoint(0, 0), NSSize(760, total_h))
+    )
+    container.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    container.addSubview_(section_lbl)
+    container.addSubview_(wrapper)
+    NSLayoutConstraint.activateConstraints_([
+        section_lbl.topAnchor().constraintEqualToAnchor_(container.topAnchor()),
+        section_lbl.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+
+        wrapper.topAnchor().constraintEqualToAnchor_constant_(
+            section_lbl.bottomAnchor(), GAP),
+        wrapper.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+        wrapper.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
+    ])
+    container.heightAnchor().constraintEqualToConstant_(total_h).setActive_(True)
+
+    return container, total_h
+
+
+# ---------------------------------------------------------------------------
 # Report panel builders
 # ---------------------------------------------------------------------------
 
@@ -1384,25 +1534,30 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
     bottom_row.addView_inGravity_(grid, 1)
     bottom_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
+    # --- Annotations table (optional) ---
+    ann_view, ann_h = build_annotations_table(intervals, tag_index)
+
     # --- Outer container sized exactly to content ---
     PAD = 12.0
     GAP = 8.0
-    # Use fittingSize() so header and grid heights are measured, not guessed.
     header_h = header.fittingSize().height
     grid_h   = grid.fittingSize().height
-    # bottom_h must be at least PIE_SIZE — PieView has no intrinsicContentSize
-    # so NSStackView won't account for it; we pin bottom_row height explicitly.
     bottom_h = max(PieView.PIE_SIZE, grid_h)
     bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
-    total_h  = PAD + header_h + GAP + tl_visible_h + GAP + LegendView.LEGEND_H + GAP + bottom_h + PAD
+    total_h  = (PAD + header_h + GAP + tl_visible_h + GAP
+                + LegendView.LEGEND_H + GAP + bottom_h
+                + (GAP + ann_h if ann_view else 0)
+                + PAD)
 
     container = NSView.alloc().initWithFrame_(
         NSRect(NSPoint(0, 0), NSSize(1000, total_h))
     )
     for v in (header, tl_scroll, legend_view, bottom_row):
         container.addSubview_(v)
+    if ann_view:
+        container.addSubview_(ann_view)
 
-    NSLayoutConstraint.activateConstraints_([
+    constraints = [
         header.topAnchor().constraintEqualToAnchor_constant_(container.topAnchor(), PAD),
         header.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         header.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
@@ -1418,7 +1573,14 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
         bottom_row.topAnchor().constraintEqualToAnchor_constant_(legend_view.bottomAnchor(), GAP),
         bottom_row.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         bottom_row.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-    ])
+    ]
+    if ann_view:
+        constraints += [
+            ann_view.topAnchor().constraintEqualToAnchor_constant_(bottom_row.bottomAnchor(), GAP),
+            ann_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
+            ann_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
+        ]
+    NSLayoutConstraint.activateConstraints_(constraints)
 
     return container, total_h
 
@@ -1560,19 +1722,27 @@ def build_custom_report_view(start_date, end_date, on_show,
     bottom_row.addView_inGravity_(grid, 1)
     bottom_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
+    # --- Annotations table (optional) ---
+    ann_view, ann_h = build_annotations_table(intervals, tag_index)
+
     PAD, GAP = 12.0, 8.0
     header_h = header.fittingSize().height
     grid_h   = grid.fittingSize().height
     bottom_h = max(PieView.PIE_SIZE, grid_h)
     bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
-    total_h  = PAD + header_h + GAP + tl_visible_h + GAP + LegendView.LEGEND_H + GAP + bottom_h + PAD
+    total_h  = (PAD + header_h + GAP + tl_visible_h + GAP
+                + LegendView.LEGEND_H + GAP + bottom_h
+                + (GAP + ann_h if ann_view else 0)
+                + PAD)
 
     container = NSView.alloc().initWithFrame_(
         NSRect(NSPoint(0, 0), NSSize(1000, total_h)))
     for v in (header, tl_scroll, legend_view, bottom_row):
         container.addSubview_(v)
+    if ann_view:
+        container.addSubview_(ann_view)
 
-    NSLayoutConstraint.activateConstraints_([
+    constraints = [
         header.topAnchor().constraintEqualToAnchor_constant_(container.topAnchor(), PAD),
         header.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         header.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
@@ -1588,7 +1758,14 @@ def build_custom_report_view(start_date, end_date, on_show,
         bottom_row.topAnchor().constraintEqualToAnchor_constant_(legend_view.bottomAnchor(), GAP),
         bottom_row.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         bottom_row.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-    ])
+    ]
+    if ann_view:
+        constraints += [
+            ann_view.topAnchor().constraintEqualToAnchor_constant_(bottom_row.bottomAnchor(), GAP),
+            ann_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
+            ann_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
+        ]
+    NSLayoutConstraint.activateConstraints_(constraints)
     return container, total_h
 
 
