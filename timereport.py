@@ -1809,13 +1809,11 @@ class ReportWindowController(NSObject):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
 
-        # "Show all" item — selecting it clears the filter
-        item_all = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Show all", "filterMenuChanged:", ""
+        # Index-0 item is the pull-down button title — never dispatched as action
+        title_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Filter tags…", None, ""
         )
-        item_all.setTarget_(self)
-        item_all.setEnabled_(True)
-        menu.addItem_(item_all)
+        menu.addItem_(title_item)
 
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1861,12 +1859,23 @@ class ReportWindowController(NSObject):
         self._filter_popup = popup
         filter_bar.addView_inGravity_(popup, 1)
 
-        # Label showing the active filter tags (hidden when "Show all")
+        # Label showing the active filter tags
         self._filter_label = NSTextField.labelWithString_("")
         self._filter_label.setFont_(NSFont.systemFontOfSize_(11))
         self._filter_label.setTextColor_(NSColor.secondaryLabelColor())
         self._filter_label.setTranslatesAutoresizingMaskIntoConstraints_(False)
         filter_bar.addView_inGravity_(self._filter_label, 1)
+
+        # "Clear filter" button — only visible when a filter is active
+        btn_clear = NSButton.buttonWithTitle_target_action_(
+            "✕ Clear filter", self, "clearFilter:"
+        )
+        btn_clear.setBezelStyle_(4)   # NSBezelStyleRounded / inline
+        btn_clear.setFont_(NSFont.systemFontOfSize_(11))
+        btn_clear.setHidden_(True)
+        btn_clear.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        self._btn_clear_filter = btn_clear
+        filter_bar.addView_inGravity_(btn_clear, 1)
 
         filter_scroll = NSView.alloc().initWithFrame_(
             NSRect(NSPoint(0, 0), NSSize(self._win_w, FILTER_H))
@@ -2007,34 +2016,39 @@ class ReportWindowController(NSObject):
         self._resize_for_period("day")
 
     @objc.typedSelector(b"v@:@")
+    def clearFilter_(self, sender):
+        for mi in self._filter_menu_items.values():
+            mi.setState_(NSControlStateValueOff)
+        self._filter_tags = None
+        self._filter_label.setStringValue_("")
+        self._btn_clear_filter.setHidden_(True)
+        selected = self._tab_view.selectedTabViewItem()
+        if selected is not None:
+            self._rebuild_tab(selected.identifier())
+
+    @objc.typedSelector(b"v@:@")
     def filterMenuChanged_(self, sender):
-        title = sender.title()
-        if title == "Show all":
-            # Clear all checkmarks and the filter
-            for mi in self._filter_menu_items.values():
-                mi.setState_(NSControlStateValueOff)
-            self._filter_tags = None
-            self._filter_label.setStringValue_("")
+        # Toggle this tag's checkmark
+        tag = sender.title()
+        mi = self._filter_menu_items.get(tag)
+        if mi is not None:
+            new_state = (NSControlStateValueOff
+                         if mi.state() == NSControlStateValueOn
+                         else NSControlStateValueOn)
+            mi.setState_(new_state)
+        # Recompute active set
+        active = {t for t, m in self._filter_menu_items.items()
+                  if m.state() == NSControlStateValueOn}
+        self._filter_tags = active if active else None
+        # Update summary label and clear button
+        if self._filter_tags:
+            self._filter_label.setStringValue_(
+                "Showing: " + ", ".join(sorted(self._filter_tags))
+            )
+            self._btn_clear_filter.setHidden_(False)
         else:
-            # Toggle this tag's checkmark
-            tag = title
-            mi = self._filter_menu_items.get(tag)
-            if mi is not None:
-                new_state = (NSControlStateValueOff
-                             if mi.state() == NSControlStateValueOn
-                             else NSControlStateValueOn)
-                mi.setState_(new_state)
-            # Recompute active set
-            active = {t for t, m in self._filter_menu_items.items()
-                      if m.state() == NSControlStateValueOn}
-            self._filter_tags = active if active else None
-            # Update summary label
-            if self._filter_tags:
-                self._filter_label.setStringValue_(
-                    "Showing: " + ", ".join(sorted(self._filter_tags))
-                )
-            else:
-                self._filter_label.setStringValue_("")
+            self._filter_label.setStringValue_("")
+            self._btn_clear_filter.setHidden_(True)
 
         # Rebuild the currently visible tab
         selected = self._tab_view.selectedTabViewItem()
