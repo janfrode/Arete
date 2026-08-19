@@ -1132,6 +1132,8 @@ class SplashWindow(NSObject):
         self._panel.close()
 
 
+
+
 class TimeBar(rumps.App):
     def __init__(self):
         super().__init__("", quit_button=None)
@@ -1218,7 +1220,7 @@ class TimeBar(rumps.App):
             if older_tags:
                 if main_tags:
                     self.menu.add(rumps.separator)
-                
+
                 older_menu = rumps.MenuItem("Older tags")
                 for tag in older_tags:
                     item = rumps.MenuItem(tag, callback=self._toggle_tag)
@@ -1229,6 +1231,33 @@ class TimeBar(rumps.App):
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("New tag…", callback=self._new_tag))
+
+        # "Add tag…" submenu — two levels (recent / older), only shown when tracking
+        recent_tags_set = set(recent_tags)
+        add_recent = [t for t in recent_tags if t not in active_tags]
+        add_older  = [t for t in all_tags if t not in active_tags and t not in recent_tags_set]
+
+        if add_recent or add_older:
+            add_menu = rumps.MenuItem("Add tag…")
+            self._add_tag_menu = add_menu
+
+            for tag in add_recent:
+                item = rumps.MenuItem(tag, callback=self._add_tag_clicked)
+                item.tag_name = tag
+                add_menu.add(item)
+
+            if add_older:
+                if add_recent:
+                    add_menu.add(rumps.separator)
+                older_sub = rumps.MenuItem("Older tags")
+                for tag in add_older:
+                    item = rumps.MenuItem(tag, callback=self._add_tag_clicked)
+                    item.tag_name = tag
+                    older_sub.add(item)
+                add_menu.add(older_sub)
+
+            self.menu.add(add_menu)
+
         self.menu.add(rumps.MenuItem("Stop all", callback=self._stop_all))
         annotate_item = rumps.MenuItem("Annotate active…", callback=self._annotate_active)
         self._annotate_active_item = annotate_item
@@ -1252,10 +1281,18 @@ class TimeBar(rumps.App):
         self._new_tag_controller.show()
 
     def _toggle_tag(self, sender):
-        from AppKit import NSEvent, NSEventModifierFlagOption
         tag = getattr(sender, "tag_name", sender.title)
-        if sender.state:
-            active = get_active_tags()
+        self._toggle_tag_by_name(tag)
+
+    def _add_tag_clicked(self, sender):
+        """Add the selected tag to the currently active set."""
+        tag = getattr(sender, "tag_name", sender.title)
+        start_tag(tag, add_to_active=True)
+        self._update_state()
+
+    def _toggle_tag_by_name(self, tag):
+        active = get_active_tags()
+        if tag in active:
             active.discard(tag)
             if active:
                 run("start", *sorted(active))
@@ -1263,9 +1300,7 @@ class TimeBar(rumps.App):
             else:
                 self._stop_with_optional_prompt()
         else:
-            modifiers = NSEvent.modifierFlags()
-            add_to_active = bool(modifiers & NSEventModifierFlagOption)
-            start_tag(tag, add_to_active=add_to_active)
+            start_tag(tag)
             self._update_state()
 
     def _annotate_active(self, _):
