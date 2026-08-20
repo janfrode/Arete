@@ -21,10 +21,11 @@ from AppKit import (
     NSFontAttributeName, NSForegroundColorAttributeName, NSBitmapImageRep,
     NSGraphicsContext, NSImage, NSBezierPath, NSColor, NSRect, NSPoint,
     NSSize, NSPNGFileType, NSImageView, NSWindowStyleMaskTitled,
-    NSWindowStyleMaskClosable, NSBackingStoreBuffered, NSUserInterfaceLayoutOrientationVertical,
+    NSWindowStyleMaskClosable, NSWindowStyleMaskResizable, NSBackingStoreBuffered, NSUserInterfaceLayoutOrientationVertical,
     NSControlStateValueOn, NSControlStateValueOff, NSModalResponseOK,
     NSModalResponseCancel, NSStackView, NSTextField, NSButton, NSWindow,
     NSBox, NSGridView, NSGridCell, NSPanel, NSWindowStyleMaskBorderless,
+    NSViewWidthSizable, NSViewHeightSizable,
     NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectStateActive, NSFontManager, NSView
 )
@@ -542,6 +543,159 @@ class NewTagWindow(NSObject):
         if tag:
             start_tag(tag)
             self.app._update_state()
+
+
+
+class HelpWindow(NSObject):
+    """Scrollable help window explaining every menu item and UI feature."""
+
+    _HELP = [
+        # (heading, body)
+        ('Menu bar title',
+         'When tracking is active the title shows the running tag(s), e.g. "dmi" or "dmi,ruv". '
+         'When idle the Arête icon is shown instead.'),
+        ('Timeline (top of menu)',
+         'A mini timeline of today\'s tracked intervals. '
+         'The vertical blue line marks the current time.'),
+        ('Tag list',
+         'Each recent tag appears as a checkable item. '
+         'Click an unchecked tag to switch to it (stops any currently running tag). '
+         'Click a checked tag to stop tracking it. '
+         'If it is the last active tag and "Prompt for annotation when stopping" is enabled, '
+         'an annotation dialog will appear.'),
+        ('Older tags (submenu)',
+         'Tags used outside the recent range (default: this month). '
+         'Behaves exactly like the main tag list.'),
+        ('New tag\u2026',
+         'Opens a small dialog to type a new tag name and start tracking it immediately.'),
+        ('Add tag\u2026 (submenu)',
+         'Only visible while tracking. '
+         'Lists all tags not currently active. '
+         'Click one to add it alongside the running tag(s) without stopping them. '
+         'Recent tags appear at the top; older tags are in the "Older tags" submenu.'),
+        ('Stop all',
+         'Stops all active tracking immediately. '
+         'If "Prompt for annotation when stopping" is enabled, an annotation dialog appears.'),
+        ('Annotate active\u2026',
+         'Only enabled while tracking. '
+         'Opens a dialog to attach a short note to the currently running interval. '
+         'The note is stored inside Timewarrior and shown in reports and tooltips.'),
+        ('Refresh tags',
+         'Re-reads all tags from Timewarrior and rebuilds the menu. '
+         'Useful after adding tags directly on the command line.'),
+        ('Show Reports\u2026',
+         'Opens the full report window with Day / Week / Month / Custom tabs. '
+         'Each tab shows a timeline, pie chart, time summary table, and \u2014 when present \u2014 '
+         'an annotations table.\n\n'
+         '\u2022 Filter tags: use the "Filter tags\u2026" pull-down to narrow the view to specific tags. '
+         'Click "\u2715 Clear filter" to reset.\n'
+         '\u2022 Prev / Next (\u25c4 \u25ba): navigate to earlier or later periods.\n'
+         '\u2022 Right-click a bar: annotate that interval or show its raw timew summary.\n'
+         '\u2022 Right-click the summary table: copy data as CSV.'),
+        ('Preferences\u2026',
+         'Opens the combined Preferences & About window.\n\n'
+         '\u2022 Pause tracking when screen locked \u2014 automatically stops the active tag when the '
+         'screen locks and resumes it on unlock.\n'
+         '\u2022 Prompt for annotation when stopping \u2014 opens an annotation dialog every time a tag '
+         'is stopped or switched.\n'
+         '\u2022 Start at login \u2014 adds Ar\u00eate to macOS login items.\n'
+         '\u2022 Show empty days in reports \u2014 includes days with no tracked time in week/month views.\n'
+         '\u2022 Recent tags range \u2014 how far back "recent" tags extend (default: month).\n'
+         '\u2022 Daily work target \u2014 used for the % of target column and pie chart remainder.'),
+        ('Annotations in reports',
+         'Any interval with an annotation shows its text inside the timeline bar (when the bar '
+         'is wide enough) and in a tooltip on hover. '
+         'A separate "Annotations" table below the pie chart lists every annotated interval '
+         'for the period, sorted by end time. Right-click it to copy as CSV.'),
+    ]
+
+    def initWithApp_(self, app):
+        self = objc.super(HelpWindow, self).init()
+        if self is None:
+            return None
+        self.app = app
+        return self
+
+    def show(self):
+        from AppKit import (
+            NSTextView, NSScrollView, NSFont as _NSFont,
+            NSMutableAttributedString, NSAttributedString,
+            NSParagraphStyle, NSMutableParagraphStyle,
+            NSFontAttributeName as _FA,
+            NSForegroundColorAttributeName as _CA,
+        )
+        from Foundation import NSMutableAttributedString as _MAS
+
+        W, H = 560, 520
+        style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(W, H)),
+            style_mask, NSBackingStoreBuffered, False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_("Arête — Help")
+        window.center()
+
+        sv = NSScrollView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, H)))
+        sv.setHasVerticalScroller_(True)
+        sv.setHasHorizontalScroller_(False)
+        sv.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        sv.setAutohidesScrollers_(True)
+
+        tv = NSTextView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, H)))
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setAutoresizingMask_(NSViewWidthSizable)
+        tv.textContainer().setWidthTracksTextView_(True)
+        tv.textContainer().setContainerSize_(NSSize(W - 24, 1e7))
+        tv.setTextContainerInset_(NSSize(12, 12))
+
+        heading_font = _NSFont.boldSystemFontOfSize_(13)
+        body_font    = _NSFont.systemFontOfSize_(12)
+        muted_color  = NSColor.secondaryLabelColor()
+        label_color  = NSColor.labelColor()
+
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setParagraphSpacing_(6.0)
+        para.setParagraphSpacingBefore_(10.0)
+
+        body_para = NSMutableParagraphStyle.alloc().init()
+        body_para.setParagraphSpacing_(2.0)
+        from AppKit import NSParagraphStyleAttributeName
+        full = _MAS.alloc().init()
+
+        for heading, body in self._HELP:
+            h_attrs = {
+                _FA: heading_font,
+                _CA: label_color,
+                NSParagraphStyleAttributeName: para,
+            }
+            b_attrs = {
+                _FA: body_font,
+                _CA: muted_color,
+                NSParagraphStyleAttributeName: body_para,
+            }
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    heading + "\n", h_attrs
+                )
+            )
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    body + "\n", b_attrs
+                )
+            )
+
+        tv.textStorage().setAttributedString_(full)
+        sv.setDocumentView_(tv)
+
+        window.setContentView_(sv)
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        # Scroll to top
+        tv.scrollRangeToVisible_((0, 0))
+
 
 
 class AnnotateWindow(NSObject):
@@ -1268,6 +1422,7 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.MenuItem("Show Reports...", callback=self._show_reports))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Preferences...", callback=self._preferences))
+        self.menu.add(rumps.MenuItem("Help…", callback=self._show_help))
         self.menu.add(rumps.MenuItem("Exit Arête", callback=rumps.quit_application))
 
     # ------------------------------------------------------------------
@@ -1347,6 +1502,14 @@ class TimeBar(rumps.App):
         )
         self._annotate_controller.show()
 
+
+    def _show_help(self, _):
+        if getattr(self, "_help_controller", None):
+            self._help_controller.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            return
+        self._help_controller = HelpWindow.alloc().initWithApp_(self)
+        self._help_controller.show()
 
     def _preferences(self, _):
         # If preferences window is already open, bring it to front
