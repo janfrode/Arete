@@ -13,6 +13,8 @@ import os
 import shutil
 import json
 import sys
+import threading
+import urllib.request
 import importlib.util
 from Foundation import NSDistributedNotificationCenter, NSObject, NSTimer, NSString
 from AppKit import (
@@ -684,6 +686,184 @@ class WhatsNewWindow(NSObject):
 
 
 
+
+
+class UpdateAvailableWindow(NSObject):
+    """Scrollable window shown when a newer version is available.
+
+    Displays the remote changelog so the user can decide whether to download,
+    with Download and Cancel buttons in a bottom bar.
+    """
+
+    def initWithCurrentVersion_remoteVersion_changelog_(self, current, remote, changelog):
+        self = objc.super(UpdateAvailableWindow, self).init()
+        if self is None:
+            return None
+        self._current = current
+        self._remote = remote
+        self._changelog = changelog
+        return self
+
+    def show(self):
+        from AppKit import (
+            NSTextView, NSScrollView, NSFont as _NSFont,
+            NSAttributedString, NSMutableParagraphStyle,
+            NSFontAttributeName as _FA,
+            NSForegroundColorAttributeName as _CA,
+            NSParagraphStyleAttributeName as _PA,
+        )
+        from Foundation import NSMutableAttributedString as _MAS
+
+        raw = self._changelog if self._changelog else "(Changelog not available)"
+
+        W, H = 580, 540
+        BTN_H = 44  # height of the button bar at the bottom
+
+        style_mask = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                      | NSWindowStyleMaskResizable)
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(W, H)),
+            style_mask, NSBackingStoreBuffered, False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_(
+            "Update available — version %s (you have %s)"
+            % (self._remote, self._current)
+        )
+        window.center()
+
+        content = NSView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, H)))
+        content.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+
+        # ── scroll + text view ──────────────────────────────────────────────
+        sv_h = H - BTN_H
+        sv = NSScrollView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, BTN_H), NSSize(W, sv_h))
+        )
+        sv.setHasVerticalScroller_(True)
+        sv.setHasHorizontalScroller_(False)
+        sv.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        sv.setAutohidesScrollers_(True)
+
+        tv = NSTextView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, sv_h)))
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setAutoresizingMask_(NSViewWidthSizable)
+        tv.textContainer().setWidthTracksTextView_(True)
+        tv.textContainer().setContainerSize_(NSSize(W - 24, 1e7))
+        tv.setTextContainerInset_(NSSize(14, 14))
+
+        full = _MAS.alloc().init()
+        h1_font   = _NSFont.boldSystemFontOfSize_(15)
+        h2_font   = _NSFont.boldSystemFontOfSize_(13)
+        body_font = _NSFont.systemFontOfSize_(12)
+        bold_font = _NSFont.boldSystemFontOfSize_(12)
+        label_col = NSColor.labelColor()
+        muted_col = NSColor.secondaryLabelColor()
+
+        def _para(indent=0, space_before=0, space_after=4):
+            p = NSMutableParagraphStyle.alloc().init()
+            p.setHeadIndent_(float(indent))
+            p.setFirstLineHeadIndent_(float(indent))
+            p.setParagraphSpacingBefore_(float(space_before))
+            p.setParagraphSpacing_(float(space_after))
+            return p
+
+        def _append(text, font, color, para):
+            attrs = {_FA: font, _CA: color, _PA: para}
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+            )
+
+        def _append_inline(line, font, color, para):
+            parts = line.split("**")
+            for i, part in enumerate(parts):
+                f = bold_font if i % 2 == 1 else font
+                if part:
+                    attrs = {_FA: f, _CA: color, _PA: para}
+                    full.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(part, attrs)
+                    )
+            attrs = {_FA: font, _CA: color, _PA: para}
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_("\n", attrs)
+            )
+
+        for line in raw.splitlines():
+            stripped = line.rstrip()
+            if stripped.startswith("## "):
+                _append(stripped[3:] + "\n", h2_font, label_col,
+                        _para(space_before=10, space_after=4))
+            elif stripped.startswith("# "):
+                _append(stripped[2:] + "\n", h1_font, label_col,
+                        _para(space_before=14, space_after=6))
+            elif stripped.startswith("- "):
+                _append_inline("\u2022 " + stripped[2:],
+                               body_font, muted_col, _para(indent=14, space_after=2))
+            elif stripped == "":
+                _append("\n", body_font, muted_col, _para(space_after=0))
+            else:
+                _append_inline(stripped, body_font, muted_col, _para(space_after=2))
+
+        tv.textStorage().setAttributedString_(full)
+        sv.setDocumentView_(tv)
+
+        # ── button bar ──────────────────────────────────────────────────────
+        btn_bar = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(W, BTN_H))
+        )
+        btn_bar.setAutoresizingMask_(NSViewWidthSizable)
+
+        sep = NSBox.alloc().initWithFrame_(
+            NSRect(NSPoint(0, BTN_H - 1), NSSize(W, 1))
+        )
+        sep.setBoxType_(2)  # NSBoxSeparator
+        sep.setAutoresizingMask_(NSViewWidthSizable)
+        btn_bar.addSubview_(sep)
+
+        btn_download = NSButton.alloc().initWithFrame_(
+            NSRect(NSPoint(W - 210, 8), NSSize(100, 28))
+        )
+        btn_download.setTitle_("Download")
+        btn_download.setBezelStyle_(1)  # NSBezelStyleRounded
+        btn_download.setKeyEquivalent_("\r")
+        btn_download.setTarget_(self)
+        btn_download.setAction_("downloadClicked:")
+        btn_download.setAutoresizingMask_(64)  # NSViewMinXMargin
+
+        btn_cancel = NSButton.alloc().initWithFrame_(
+            NSRect(NSPoint(W - 104, 8), NSSize(90, 28))
+        )
+        btn_cancel.setTitle_("Cancel")
+        btn_cancel.setBezelStyle_(1)
+        btn_cancel.setKeyEquivalent_("\x1b")
+        btn_cancel.setTarget_(self)
+        btn_cancel.setAction_("cancelClicked:")
+        btn_cancel.setAutoresizingMask_(64)  # NSViewMinXMargin
+
+        btn_bar.addSubview_(btn_download)
+        btn_bar.addSubview_(btn_cancel)
+
+        content.addSubview_(sv)
+        content.addSubview_(btn_bar)
+        window.setContentView_(content)
+
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        tv.scrollRangeToVisible_((0, 0))
+
+    @objc.typedSelector(b"v@:@")
+    def downloadClicked_(self, sender):
+        import subprocess as _sp
+        _sp.Popen(["open", UPDATE_DOWNLOAD_URL])
+        self.window.close()
+        self.window = None
+
+    @objc.typedSelector(b"v@:@")
+    def cancelClicked_(self, sender):
+        self.window.close()
+        self.window = None
 
 
 class HelpWindow(NSObject):
@@ -1430,6 +1610,84 @@ class SplashWindow(NSObject):
 
 
 
+UPDATE_VERSION_URL = "https://tanso.net/Arete.version"
+UPDATE_CHANGES_URL = "https://tanso.net/Arete-Changes.md"
+UPDATE_DOWNLOAD_URL = "https://tanso.net/Arete.dmg"
+
+
+class UpdateChecker(NSObject):
+    """Fetches the remote version string in a background thread and shows an
+    NSAlert on the main thread with the result."""
+
+    def initWithCurrentVersion_(self, current_version):
+        self = objc.super(UpdateChecker, self).init()
+        if self is None:
+            return None
+        self._current = current_version
+        return self
+
+    def check(self):
+        """Spawn background thread — call this once."""
+        t = threading.Thread(target=self._fetch, daemon=True)
+        t.start()
+
+    def _fetch(self):
+        headers = {"User-Agent": "Arete/" + self._current}
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(UPDATE_VERSION_URL, headers=headers), timeout=5
+            ) as resp:
+                remote = resp.read(64).decode("utf-8").strip()
+        except Exception as exc:
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "showError:", str(exc), False
+            )
+            return
+        # Fetch changelog; fall back silently if unavailable
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(UPDATE_CHANGES_URL, headers=headers), timeout=5
+            ) as resp:
+                self._remote_changelog = resp.read(128 * 1024).decode("utf-8")
+        except Exception:
+            self._remote_changelog = ""
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showResult:", remote, False
+        )
+
+    @objc.typedSelector(b"v@:@")
+    def showResult_(self, remote_version):
+        if remote_version != self._current:
+            # Open a scrollable window showing the remote changelog + Download button
+            changelog = getattr(self, "_remote_changelog", "")
+            win = UpdateAvailableWindow.alloc(
+            ).initWithCurrentVersion_remoteVersion_changelog_(
+                self._current, remote_version, changelog
+            )
+            # Store on self so GC doesn't collect it while the window is open
+            self._update_win = win
+            win.show()
+        else:
+            from AppKit import NSAlert
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Arête is up to date")
+            alert.setInformativeText_("You are running version %s." % self._current)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            alert.runModal()
+
+    @objc.typedSelector(b"v@:@")
+    def showError_(self, error_message):
+        from AppKit import NSAlert
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Could not check for updates")
+        alert.setInformativeText_(
+            "An error occurred while checking for updates:\n%s" % error_message
+        )
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        alert.runModal()
+
+
+
 class TimeBar(rumps.App):
     def __init__(self):
         super().__init__("", quit_button=None)
@@ -1563,6 +1821,7 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Preferences...", callback=self._preferences))
         self.menu.add(rumps.MenuItem("What's New…", callback=self._show_whats_new))
+        self.menu.add(rumps.MenuItem("Check for updates…", callback=self._check_for_updates))
         self.menu.add(rumps.MenuItem("Help…", callback=self._show_help))
         self.menu.add(rumps.MenuItem("Exit Arête", callback=rumps.quit_application))
 
@@ -1651,6 +1910,12 @@ class TimeBar(rumps.App):
             return
         self._whats_new_controller = WhatsNewWindow.alloc().initWithApp_(self)
         self._whats_new_controller.show()
+
+    def _check_for_updates(self, _):
+        checker = UpdateChecker.alloc().initWithCurrentVersion_(VERSION)
+        # Keep a strong reference so the ObjC object isn't GC'd before callbacks fire
+        self._update_checker = checker
+        checker.check()
 
     def _show_help(self, _):
         if getattr(self, "_help_controller", None):

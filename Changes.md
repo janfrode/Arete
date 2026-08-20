@@ -1,5 +1,8 @@
 # What's New in Arête
 
+## 1.0.9-dev
+- Check for updates
+
 ## 1.0.8
 - **Annotations** — attach notes to any tracked interval from the menu bar or the reports timeline. Enable "Prompt for annotation when stopping" in Preferences to be asked automatically each time a task stops or switches.
 - **Add tag… submenu** — add a second tag alongside the running one directly from the menu, without stopping. Recent tags appear at the top; older tags are nested underneath.
