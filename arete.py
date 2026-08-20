@@ -1610,9 +1610,9 @@ class SplashWindow(NSObject):
 
 
 
-UPDATE_VERSION_URL = "https://tanso.net/Arete.version"
-UPDATE_CHANGES_URL = "https://tanso.net/Arete-Changes.md"
-UPDATE_DOWNLOAD_URL = "https://tanso.net/Arete.dmg"
+UPDATE_VERSION_URL = "https://tanso.net/Arete/version"
+UPDATE_CHANGES_URL = "https://tanso.net/Arete/Changes.md"
+UPDATE_DOWNLOAD_URL = "https://tanso.net/Arete/Arete.dmg"
 
 
 class UpdateChecker(NSObject):
