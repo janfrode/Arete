@@ -34,7 +34,7 @@ import objc
 
 
 CONFIG_PATH = os.path.expanduser("~/.arete.json")
-VERSION = "1.0.8"
+VERSION = "1.0.9-dev"
 
 
 def _make_menubar_icon():
@@ -97,6 +97,21 @@ def get_bundle_path():
         abs_fallback = os.path.abspath(fallback)
         if os.path.exists(abs_fallback):
             return abs_fallback
+    return None
+
+
+def get_changes_path():
+    """Return path to Changes.md — bundle Resources first, then dev fallback."""
+    app_path = get_bundle_path()
+    if app_path:
+        p = os.path.join(app_path, "Contents", "Resources", "Changes.md")
+        if os.path.exists(p):
+            return p
+    # Dev / script run: same directory as arete.py
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(here, "Changes.md")
+    if os.path.exists(p):
+        return p
     return None
 
 
@@ -543,6 +558,131 @@ class NewTagWindow(NSObject):
         if tag:
             start_tag(tag)
             self.app._update_state()
+
+
+class WhatsNewWindow(NSObject):
+    """Scrollable window that displays Changes.md with basic Markdown rendering.
+
+    ## headings are bold+large, - bullet lines are indented, **text** is bold.
+    Falls back to plain text if the file is missing.
+    """
+
+    def initWithApp_(self, app):
+        self = objc.super(WhatsNewWindow, self).init()
+        if self is None:
+            return None
+        self.app = app
+        return self
+
+    def show(self):
+        from AppKit import (
+            NSTextView, NSScrollView, NSFont as _NSFont,
+            NSAttributedString, NSMutableParagraphStyle,
+            NSFontAttributeName as _FA,
+            NSForegroundColorAttributeName as _CA,
+            NSParagraphStyleAttributeName as _PA,
+        )
+        from Foundation import NSMutableAttributedString as _MAS
+
+        # Read file
+        path = get_changes_path()
+        if path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception:
+                raw = "(Could not read Changes.md)"
+        else:
+            raw = "(Changes.md not found)"
+
+        W, H = 580, 540
+        style_mask = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                      | NSWindowStyleMaskResizable)
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(W, H)),
+            style_mask, NSBackingStoreBuffered, False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_("What's New in Arête")
+        window.center()
+
+        sv = NSScrollView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, H)))
+        sv.setHasVerticalScroller_(True)
+        sv.setHasHorizontalScroller_(False)
+        sv.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        sv.setAutohidesScrollers_(True)
+
+        tv = NSTextView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(W, H)))
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setAutoresizingMask_(NSViewWidthSizable)
+        tv.textContainer().setWidthTracksTextView_(True)
+        tv.textContainer().setContainerSize_(NSSize(W - 24, 1e7))
+        tv.setTextContainerInset_(NSSize(14, 14))
+
+        full = _MAS.alloc().init()
+
+        h1_font    = _NSFont.boldSystemFontOfSize_(15)
+        h2_font    = _NSFont.boldSystemFontOfSize_(13)
+        body_font  = _NSFont.systemFontOfSize_(12)
+        bold_font  = _NSFont.boldSystemFontOfSize_(12)
+        label_col  = NSColor.labelColor()
+        muted_col  = NSColor.secondaryLabelColor()
+
+        def _para(indent=0, space_before=0, space_after=4):
+            p = NSMutableParagraphStyle.alloc().init()
+            p.setHeadIndent_(float(indent))
+            p.setFirstLineHeadIndent_(float(indent))
+            p.setParagraphSpacingBefore_(float(space_before))
+            p.setParagraphSpacing_(float(space_after))
+            return p
+
+        def _append(text, font, color, para):
+            attrs = {_FA: font, _CA: color, _PA: para}
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+            )
+
+        def _append_inline(line, font, color, para):
+            """Append a line supporting **bold** spans, ending with newline."""
+            parts = line.split("**")
+            for i, part in enumerate(parts):
+                f = bold_font if i % 2 == 1 else font
+                if part:
+                    attrs = {_FA: f, _CA: color, _PA: para}
+                    full.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(part, attrs)
+                    )
+            attrs = {_FA: font, _CA: color, _PA: para}
+            full.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_("\n", attrs)
+            )
+
+        for line in raw.splitlines():
+            stripped = line.rstrip()
+            if stripped.startswith("## "):
+                _append(stripped[3:] + "\n", h2_font, label_col,
+                        _para(space_before=10, space_after=4))
+            elif stripped.startswith("# "):
+                _append(stripped[2:] + "\n", h1_font, label_col,
+                        _para(space_before=14, space_after=6))
+            elif stripped.startswith("- "):
+                _append_inline("\u2022 " + stripped[2:],
+                               body_font, muted_col, _para(indent=14, space_after=2))
+            elif stripped == "":
+                _append("\n", body_font, muted_col, _para(space_after=0))
+            else:
+                _append_inline(stripped, body_font, muted_col, _para(space_after=2))
+
+        tv.textStorage().setAttributedString_(full)
+        sv.setDocumentView_(tv)
+        window.setContentView_(sv)
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        tv.scrollRangeToVisible_((0, 0))
+
+
 
 
 
@@ -1422,6 +1562,7 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.MenuItem("Show Reports...", callback=self._show_reports))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Preferences...", callback=self._preferences))
+        self.menu.add(rumps.MenuItem("What's New…", callback=self._show_whats_new))
         self.menu.add(rumps.MenuItem("Help…", callback=self._show_help))
         self.menu.add(rumps.MenuItem("Exit Arête", callback=rumps.quit_application))
 
@@ -1502,6 +1643,14 @@ class TimeBar(rumps.App):
         )
         self._annotate_controller.show()
 
+
+    def _show_whats_new(self, _):
+        if getattr(self, "_whats_new_controller", None):
+            self._whats_new_controller.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            return
+        self._whats_new_controller = WhatsNewWindow.alloc().initWithApp_(self)
+        self._whats_new_controller.show()
 
     def _show_help(self, _):
         if getattr(self, "_help_controller", None):

@@ -26,6 +26,8 @@ APP = ['arete.py']
 DATA_FILES = [
     # timereport.py is loaded in-process by arete.py; ship it alongside.
     ('', ['timereport.py']),
+    # Changes.md is read by the "What's New" window.
+    ('', ['Changes.md']),
 ]
 # Bundle the timew binary built by build_dmg.sh so the app works without a
 # separate TimeWarrior installation.  arete.py will use it as a fallback.
