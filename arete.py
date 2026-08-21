@@ -1940,9 +1940,11 @@ def stop_tag(tag):
 
 
 class SplashWindow(NSObject):
-    """Borderless splash panel shown briefly at startup."""
+    """Borderless splash panel shown briefly at startup, with fade in/out."""
 
-    DURATION = 1.5  # seconds before auto-dismiss
+    SHOW_DURATION  = 2.2   # seconds visible before fade-out begins
+    FADE_IN_SECS   = 0.35
+    FADE_OUT_SECS  = 0.45
 
     QUOTE = (
         "\u201cWe are what we repeatedly do, therefore, "
@@ -1951,13 +1953,20 @@ class SplashWindow(NSObject):
     )
 
     def show(self):
-        PAD      = 28   # outer padding
-        ICON     = 96   # icon size
-        W        = 340
-        QUOTE_H  = 100  # generous — ~3 wrapped lines at 12pt needs ~54 px
-        SUB_H    = 18
-        NAME_H   = 26
-        H = PAD + ICON + 14 + NAME_H + 6 + SUB_H + 10 + QUOTE_H + PAD
+        from AppKit import NSAnimationContext
+
+        PAD     = 36
+        ICON    = 120
+        W       = 400
+        NAME_H  = 34
+        VER_H   = 18
+        SUB_H   = 18
+        QUOTE_H = 72
+        GAP1    = 16   # below icon
+        GAP2    = 4    # between name and version
+        GAP3    = 6    # between version and subtitle
+        GAP4    = 18   # between subtitle and quote
+        H = PAD + ICON + GAP1 + NAME_H + GAP2 + VER_H + GAP3 + SUB_H + GAP4 + QUOTE_H + PAD
 
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSRect(NSPoint(0, 0), NSSize(W, H)),
@@ -1968,75 +1977,94 @@ class SplashWindow(NSObject):
         panel.setReleasedWhenClosed_(False)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setLevel_(3)  # NSFloatingWindowLevel
+        panel.setLevel_(3)   # NSFloatingWindowLevel
+        panel.setAlphaValue_(0.0)
         panel.center()
 
-        # Frosted-glass background
+        # ── frosted-glass card ───────────────────────────────────────────────
         vfx = NSVisualEffectView.alloc().initWithFrame_(
             NSRect(NSPoint(0, 0), NSSize(W, H))
         )
         vfx.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         vfx.setState_(NSVisualEffectStateActive)
         vfx.setWantsLayer_(True)
-        vfx.layer().setCornerRadius_(16.0)
+        vfx.layer().setCornerRadius_(20.0)
         vfx.layer().setMasksToBounds_(True)
         panel.setContentView_(vfx)
 
-        italic_12 = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(
-            NSFont.systemFontOfSize_(12), 1
-        )
         content_w = W - 2 * PAD
 
-        # Layout top-down in flipped (screen) coordinates: y=0 at top of panel.
-        # We place each element from the top, incrementing y downward.
-        # AppKit view coords have y=0 at bottom, so each frame y = H - y_screen - height.
-        y_screen = PAD   # screen-space cursor from top
+        # Helper: AppKit y-up from top-down screen cursor
+        def appkit_y(y_screen, h):
+            return H - y_screen - h
 
-        # Icon — centred horizontally at the top
+        y = PAD   # top-down cursor
+
+        # ── icon ────────────────────────────────────────────────────────────
         icon_path = get_icon_path()
         if icon_path:
             logo_img = NSImage.alloc().initWithContentsOfFile_(icon_path)
             if logo_img:
                 logo_img.setSize_(NSSize(ICON, ICON))
-                icon_x = (W - ICON) / 2
-                icon_y = H - y_screen - ICON   # convert to AppKit y-up
-                logo_view = NSImageView.alloc().initWithFrame_(
-                    NSRect(NSPoint(icon_x, icon_y), NSSize(ICON, ICON))
+                iv = NSImageView.alloc().initWithFrame_(
+                    NSRect(NSPoint((W - ICON) / 2, appkit_y(y, ICON)), NSSize(ICON, ICON))
                 )
-                logo_view.setImage_(logo_img)
-                logo_view.setImageScaling_(3)
-                vfx.addSubview_(logo_view)
-        y_screen += ICON + 14
+                iv.setImage_(logo_img)
+                iv.setImageScaling_(3)
+                vfx.addSubview_(iv)
+        y += ICON + GAP1
 
-        # App name
-        name_y = H - y_screen - NAME_H
-        lbl_name = NSTextField.labelWithString_("Arête")
-        lbl_name.setFont_(NSFont.boldSystemFontOfSize_(20))
-        lbl_name.setFrame_(NSRect(NSPoint(PAD, name_y), NSSize(content_w, NAME_H)))
+        # ── app name ─────────────────────────────────────────────────────────
+        lbl_name = NSTextField.labelWithString_("Ar\u00eate")
+        lbl_name.setFont_(NSFont.boldSystemFontOfSize_(26))
+        lbl_name.setAlignment_(1)   # centre
+        lbl_name.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, NAME_H)), NSSize(content_w, NAME_H)))
         vfx.addSubview_(lbl_name)
-        y_screen += NAME_H + 6
+        y += NAME_H + GAP2
 
-        # "Starting…" subtitle
-        sub_y = H - y_screen - SUB_H
+        # ── version ──────────────────────────────────────────────────────────
+        lbl_ver = NSTextField.labelWithString_(f"Version {VERSION}")
+        lbl_ver.setFont_(NSFont.systemFontOfSize_(12))
+        lbl_ver.setTextColor_(NSColor.secondaryLabelColor())
+        lbl_ver.setAlignment_(1)
+        lbl_ver.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, VER_H)), NSSize(content_w, VER_H)))
+        vfx.addSubview_(lbl_ver)
+        y += VER_H + GAP3
+
+        # ── "Starting…" ───────────────────────────────────────────────────────
         lbl_sub = NSTextField.labelWithString_("Starting\u2026")
         lbl_sub.setFont_(NSFont.systemFontOfSize_(13))
-        lbl_sub.setTextColor_(NSColor.secondaryLabelColor())
-        lbl_sub.setFrame_(NSRect(NSPoint(PAD, sub_y), NSSize(content_w, SUB_H)))
+        lbl_sub.setTextColor_(NSColor.tertiaryLabelColor())
+        lbl_sub.setAlignment_(1)
+        lbl_sub.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, SUB_H)), NSSize(content_w, SUB_H)))
         vfx.addSubview_(lbl_sub)
-        y_screen += SUB_H + 10
+        y += SUB_H + GAP4
 
-        # Quote — wrapping NSTextField (not labelWithString which is single-line)
-        quote_y = H - y_screen - QUOTE_H
+        # ── thin separator ───────────────────────────────────────────────────
+        sep_h = 1
+        sep = NSBox.alloc().initWithFrame_(
+            NSRect(NSPoint(PAD, appkit_y(y, sep_h)), NSSize(content_w, sep_h))
+        )
+        sep.setBoxType_(2)   # NSBoxSeparator
+        vfx.addSubview_(sep)
+        y += sep_h + 10
+
+        # ── quote ────────────────────────────────────────────────────────────
+        italic_11 = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(
+            NSFont.systemFontOfSize_(11), 1
+        )
+        q_h = QUOTE_H - 10   # leave some breathing room
         tf = NSTextField.alloc().initWithFrame_(
-            NSRect(NSPoint(PAD, quote_y), NSSize(content_w, QUOTE_H))
+            NSRect(NSPoint(PAD, appkit_y(y, q_h)), NSSize(content_w, q_h))
         )
         tf.setStringValue_(self.QUOTE)
-        tf.setFont_(italic_12)
+        tf.setFont_(italic_11)
         tf.setTextColor_(NSColor.secondaryLabelColor())
         tf.setBezeled_(False)
         tf.setDrawsBackground_(False)
         tf.setEditable_(False)
         tf.setSelectable_(False)
+        tf.setAlignment_(1)
         tf.cell().setWraps_(True)
         tf.setMaximumNumberOfLines_(0)
         vfx.addSubview_(tf)
@@ -2044,8 +2072,26 @@ class SplashWindow(NSObject):
         self._panel = panel
         panel.makeKeyAndOrderFront_(None)
 
+        # ── fade in ──────────────────────────────────────────────────────────
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(self.FADE_IN_SECS)
+        panel.animator().setAlphaValue_(1.0)
+        NSAnimationContext.endGrouping()
+
+        # Schedule fade-out start
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            self.DURATION, self, "dismiss:", None, False
+            self.SHOW_DURATION, self, "fadeOut:", None, False
+        )
+
+    @objc.typedSelector(b"v@:@")
+    def fadeOut_(self, timer):
+        from AppKit import NSAnimationContext
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(self.FADE_OUT_SECS)
+        self._panel.animator().setAlphaValue_(0.0)
+        NSAnimationContext.endGrouping()
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            self.FADE_OUT_SECS + 0.05, self, "dismiss:", None, False
         )
 
     @objc.typedSelector(b"v@:@")
