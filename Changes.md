@@ -1,7 +1,9 @@
 # What's New in Arête
 
-## 1.0.9-dev
+## 1.0.9
 - Check for updates
+- Limit menu bar realestate
+- Remove annotations from graphs
 
 ## 1.0.8
 - **Annotations** — attach notes to any tracked interval from the menu bar or the reports timeline. Enable "Prompt for annotation when stopping" in Preferences to be asked automatically each time a task stops or switches.

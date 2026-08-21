@@ -20,7 +20,15 @@ if os.path.abspath(sys.executable) != os.path.abspath(_VENV_PYTHON):
         sys.exit(1)
 
 from setuptools import setup
-from arete import VERSION
+
+def _read_version():
+    with open(os.path.join(_HERE, "version"), encoding="utf-8") as _f:
+        v = _f.read().strip()
+    if not v:
+        raise RuntimeError("version file is empty")
+    return v
+
+VERSION = _read_version()
 
 APP = ['arete.py']
 DATA_FILES = [
@@ -28,6 +36,8 @@ DATA_FILES = [
     ('', ['timereport.py']),
     # Changes.md is read by the "What's New" window.
     ('', ['Changes.md']),
+    # version is the single source of truth for the app version number.
+    ('', ['version']),
 ]
 # Bundle the timew binary built by build_dmg.sh so the app works without a
 # separate TimeWarrior installation.  arete.py will use it as a fallback.

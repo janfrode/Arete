@@ -36,18 +36,26 @@ import objc
 
 
 CONFIG_PATH = os.path.expanduser("~/.arete.json")
-VERSION = "1.0.9-dev"
+def _read_version():
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "version"), encoding="utf-8") as _f:
+        v = _f.read().strip()
+    if not v:
+        raise RuntimeError("version file is empty")
+    return v
+
+VERSION = _read_version()
 
 
 def _make_menubar_icon():
-    """Render a 44×44 monochrome template icon (three bars) for the menu bar.
+    """Render a 44×44 pixel icon at 22×22 pt logical size for the menu bar.
 
     Returns the path to a temp PNG, or None on failure.
     macOS template images must end in 'Template' — rumps handles that when
     template=True is passed, but we set NSImage.setTemplate_ directly instead.
     """
     import tempfile
-    SIZE = 44   # points @2x → shown at 22 pt in the menu bar
+    SIZE = 44   # pixel size (@2x Retina detail)
     img = NSImage.alloc().initWithSize_(NSSize(SIZE, SIZE))
     img.lockFocus()
 
@@ -79,6 +87,10 @@ def _make_menubar_icon():
         p.fill()
 
     img.unlockFocus()
+    # Set logical size to 22×22 pt so macOS uses exactly one status-item slot.
+    # The 44 px pixel data provides Retina sharpness; without this the image
+    # would be treated as 44 pt wide and consume twice the menu bar space.
+    img.setSize_(NSSize(22, 22))
     img.setTemplate_(True)   # tells macOS to tint for light/dark menu bar
 
     bm  = NSBitmapImageRep.imageRepWithData_(img.TIFFRepresentation())
@@ -2076,9 +2088,13 @@ class TimeBar(rumps.App):
                 item.title = tag
 
         if active:
-            # Show the active tags as text; hide the icon so text stands alone
+            # Show the active tags as text; hide the icon so text stands alone.
+            # Truncate to 20 chars to avoid overflowing the menu bar.
+            title = ",".join(sorted(active))
+            if len(title) > 20:
+                title = title[:19] + "…"
             self.icon = None
-            self.title = ",".join(sorted(active))
+            self.title = title
         else:
             # Idle: show only the logo, no text
             self.title = ""

@@ -311,13 +311,6 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         frac = max(0.0, min(1.0, frac))
         return graph_x0 + frac * graph_w
 
-    ANN_FONT_SIZE = 9.0
-    ann_font = NSFont.systemFontOfSize_(ANN_FONT_SIZE)
-    ann_attrs = {
-        NSFontAttributeName: ann_font,
-        NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
-    }
-
     for rect, tag, _s, _e, ann, _iid in hits:
         r_val = (rect.size.height - 1.0) / 2.0
         bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
@@ -329,30 +322,6 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         tag_color(cidx, 0.90).set()
         bar_path.setLineWidth_(1.0)
         bar_path.stroke()
-
-        # Draw annotation text inside the bar (near the top) when tall enough.
-        # AppKit y-up: rect.origin.y is the bottom, top = origin.y + height.
-        # Text baseline at origin.y + 2.0 keeps it visually inside the bar.
-        if ann and rect.size.height >= 14.0:
-            max_w = rect.size.width - 6.0
-            if max_w > 20.0:
-                ann_y = rect.origin.y + 2.0   # baseline just above bar bottom
-                lbl = NSString.stringWithString_(ann)
-                lbl_sz = lbl.sizeWithAttributes_(ann_attrs)
-                if lbl_sz.width > max_w:
-                    NSGraphicsContext.currentContext().saveGraphicsState()
-                    NSBezierPath.bezierPathWithRect_(
-                        NSRect(NSPoint(rect.origin.x + 3.0, ann_y - 1.0),
-                               NSSize(max_w, ANN_FONT_SIZE + 2.0))
-                    ).setClip()
-                    lbl.drawAtPoint_withAttributes_(
-                        NSPoint(rect.origin.x + 3.0, ann_y), ann_attrs
-                    )
-                    NSGraphicsContext.currentContext().restoreGraphicsState()
-                else:
-                    lbl.drawAtPoint_withAttributes_(
-                        NSPoint(rect.origin.x + 3.0, ann_y), ann_attrs
-                    )
 
     # "Now" indicator
     if now_dt and t_start <= now_dt <= t_end:

@@ -69,7 +69,8 @@ dist/Arete.dmg: dist/Arete.app/Contents/MacOS/Arete
 # rebuilding — that way dist/Arete.dmg's mtime is preserved and make won't
 # redundantly re-assemble the DMG if only the app changed.
 # --------------------------------------------------------------------------
-dist/Arete.app/Contents/MacOS/Arete: $(VENV_PYTHON) Arete.icns .timew-$(TIMEW_VERSION) $(PY_SOURCES)
+dist/Arete.app/Contents/MacOS/Arete: $(VENV_PYTHON) Arete.icns .timew-$(TIMEW_VERSION) $(PY_SOURCES) version Changes.md
+	@[ -s version ] || { echo "ERROR: version file is empty"; exit 1; }
 	@echo "==> Building Arete.app with py2app..."
 	rm -rf build dist/Arete.app
 	$(VENV_PYTHON) setup.py py2app
