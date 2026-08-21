@@ -32,6 +32,7 @@ from AppKit import (
     NSGridView, NSGridColumn,
     NSButton, NSMenu, NSMenuItem, NSPopUpButton,
     NSControlStateValueOn, NSControlStateValueOff,
+    NSCursor,
 )
 from AppKit import (
     NSFontAttributeName, NSForegroundColorAttributeName,
@@ -73,6 +74,20 @@ def run_timew(*args):
         encoding="utf-8",
         errors="replace",
     )
+    return result.stdout.strip()
+
+
+def run_timew_checked(*args):
+    """Like run_timew() but raises RuntimeError on non-zero exit."""
+    result = subprocess.run(
+        [TIMEW] + list(args),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip())
     return result.stdout.strip()
 
 
@@ -240,7 +255,11 @@ def seconds_to_hm(s):
 def _layout_row(ctx_intervals, y_base, row_h, graph_x0, graph_w, t_start, t_end):
     """Compute bar geometry for a row without drawing anything.
 
-    Returns list of (NSRect, tag, start_dt, end_dt) hit-test records.
+    Returns list of hit-test records:
+      (NSRect, tag, start_dt, end_dt, annotation, interval_id,
+       graph_x0, graph_w, t_start, t_end)
+    The last four fields carry the axis geometry so callers can reverse-map
+    x-positions back to datetimes (needed for in-place drag editing).
     """
     total_secs = (t_end - t_start).total_seconds()
     if total_secs <= 0:
@@ -282,7 +301,8 @@ def _layout_row(ctx_intervals, y_base, row_h, graph_x0, graph_w, t_start, t_end)
     for x0, x1, lane_idx, tag, start_dt, end_dt, annotation, interval_id in draw_data:
         y = y_base + lane_idx * lane_h + 1.0
         rect = NSRect(NSPoint(x0, y), NSSize(x1 - x0, lane_h - 1.0))
-        hits.append((rect, tag, start_dt, end_dt, annotation, interval_id))
+        hits.append((rect, tag, start_dt, end_dt, annotation, interval_id,
+                     graph_x0, graph_w, t_start, t_end))
     return hits
 
 
@@ -311,7 +331,7 @@ def _draw_row(ctx_intervals, tag_index, y_base, row_h, graph_x0, graph_w,
         frac = max(0.0, min(1.0, frac))
         return graph_x0 + frac * graph_w
 
-    for rect, tag, _s, _e, ann, _iid in hits:
+    for rect, tag, _s, _e, ann, _iid, *_ in hits:
         r_val = (rect.size.height - 1.0) / 2.0
         bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, r_val, r_val
@@ -594,30 +614,44 @@ class TimelineView(NSView):
         objc.super(TimelineView, self).setFrameSize_(size)
         self.setNeedsDisplay_(True)
 
-    def drawRect_(self, dirty_rect):
-        bounds = self.bounds()
-        width = bounds.size.width
-        height = self._height
+    # ── drag state ──────────────────────────────────────────────────────────
+    # _drag: None | dict with keys:
+    #   edge        – "start" or "end"
+    #   interval_id – int
+    #   orig_dt     – original datetime before drag
+    #   current_dt  – datetime currently shown during drag
+    #   rect        – original bar NSRect (for overlay drawing reference)
+    #   tag         – tag string (for colour)
+    #   gx0, gw     – graph_x0, graph_w
+    #   t_start, t_end – axis span datetimes
 
-        NSColor.windowBackgroundColor().set()
-        NSBezierPath.fillRect_(bounds)
-        NSGraphicsContext.currentContext().setShouldAntialias_(True)
+    _EDGE_HIT_PX = 8.0   # px from bar edge that counts as a handle grab
 
-        graph_x0 = float(LABEL_W)
-        graph_w = float(width - LABEL_W - PAD_RIGHT)
-
-        hits = _paint_timeline(
-            self._rows, self._tag_index,
-            self._hour_start, self._hour_end,
-            width, height,
-            self._row_heights, graph_x0, graph_w,
-        )
-        self._hit_rects = hits
+    def _edge_hit(self, pt):
+        """Return (entry, "start"|"end") if pt is near a bar edge, else None."""
+        for entry in self._hit_rects:
+            rect = entry[0]
+            interval_id = entry[5]
+            if interval_id is None:
+                continue
+            bar_left  = rect.origin.x
+            bar_right = rect.origin.x + rect.size.width
+            bar_top   = rect.origin.y + rect.size.height
+            bar_bot   = rect.origin.y
+            # Must be within the bar's vertical extent
+            if not (bar_bot <= pt.y <= bar_top):
+                continue
+            if abs(pt.x - bar_left) <= self._EDGE_HIT_PX:
+                return entry, "start"
+            if abs(pt.x - bar_right) <= self._EDGE_HIT_PX:
+                return entry, "end"
+        return None
 
     def mouseMoved_(self, event):
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
         tip = ""
-        for rect, tag, start_dt, end_dt, annotation, _iid in self._hit_rects:
+        for entry in self._hit_rects:
+            rect, tag, start_dt, end_dt, annotation = entry[0], entry[1], entry[2], entry[3], entry[4]
             if NSPointInRect(pt, rect):
                 duration = (end_dt - start_dt).total_seconds()
                 tip = (
@@ -630,12 +664,97 @@ class TimelineView(NSView):
                 break
         self.setToolTip_(tip)
 
+        # Update cursor based on proximity to bar edges
+        edge = self._edge_hit(pt)
+        if edge is not None:
+            NSCursor.resizeLeftRightCursor().set()
+        else:
+            NSCursor.arrowCursor().set()
+
     def _hit_at_point(self, pt):
         """Return the hit-rect tuple under *pt*, or None."""
         for entry in self._hit_rects:
             if NSPointInRect(pt, entry[0]):
                 return entry
         return None
+
+    def mouseDown_(self, event):
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        edge_hit = self._edge_hit(pt)
+        if edge_hit is None:
+            self._drag = None
+            return
+        entry, edge = edge_hit
+        rect, tag, start_dt, end_dt, _ann, interval_id, gx0, gw, t_start, t_end = entry
+        orig_dt = start_dt if edge == "start" else end_dt
+        self._drag = {
+            "edge":        edge,
+            "interval_id": interval_id,
+            "orig_dt":     orig_dt,
+            "current_dt":  orig_dt,
+            "rect":        rect,
+            "tag":         tag,
+            "gx0":         gx0,
+            "gw":          gw,
+            "t_start":     t_start,
+            "t_end":       t_end,
+        }
+        NSCursor.resizeLeftRightCursor().push()
+
+    def mouseDragged_(self, event):
+        if not getattr(self, "_drag", None):
+            return
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        d = self._drag
+        # Reverse-map x → datetime, snap to minute
+        total_secs = (d["t_end"] - d["t_start"]).total_seconds()
+        frac = max(0.0, min(1.0, (pt.x - d["gx0"]) / d["gw"]))
+        snapped = d["t_start"] + timedelta(seconds=round(frac * total_secs / 60) * 60)
+        d["current_dt"] = snapped
+        self.setNeedsDisplay_(True)
+
+    def mouseUp_(self, event):
+        drag = getattr(self, "_drag", None)
+        if not drag:
+            return
+        NSCursor.pop()
+        self._drag = None
+
+        new_dt = drag["current_dt"]
+        orig_dt = drag["orig_dt"]
+        if new_dt == orig_dt:
+            return   # no change — skip the write
+
+        iid = f"@{drag['interval_id']}"
+        timew_dt = new_dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
+        try:
+            run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
+        except RuntimeError:
+            pass   # silently revert — redraw will restore original
+
+        refresh = getattr(self, "_on_refresh", None)
+        if refresh is not None:
+            refresh()
+        else:
+            self.setNeedsDisplay_(True)
+
+    def resetCursorRects(self):
+        for entry in self._hit_rects:
+            rect = entry[0]
+            interval_id = entry[5]
+            if interval_id is None:
+                continue
+            bar_left  = rect.origin.x
+            bar_top   = rect.origin.y + rect.size.height
+            bar_bot   = rect.origin.y
+            bar_h     = rect.size.height
+            w         = self._EDGE_HIT_PX * 2
+            for ex in (bar_left, bar_left + rect.size.width):
+                self.addCursorRect_cursor_(
+                    NSRect(NSPoint(ex - self._EDGE_HIT_PX, bar_bot),
+                           NSSize(w, bar_h)),
+                    NSCursor.resizeLeftRightCursor(),
+                )
 
     def rightMouseDown_(self, event):
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
@@ -673,7 +792,7 @@ class TimelineView(NSView):
         hit = getattr(self, "_right_click_hit", None)
         if not hit:
             return
-        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit
+        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit[:6]
         if interval_id is None:
             return
         tags_hint = tag
@@ -703,12 +822,69 @@ class TimelineView(NSView):
         self._annotate_ctrl = ctrl  # keep alive
         ctrl.show()
 
+    def drawRect_(self, dirty_rect):
+        bounds = self.bounds()
+        width = bounds.size.width
+        height = self._height
+
+        NSColor.windowBackgroundColor().set()
+        NSBezierPath.fillRect_(bounds)
+        NSGraphicsContext.currentContext().setShouldAntialias_(True)
+
+        graph_x0 = float(LABEL_W)
+        graph_w = float(width - LABEL_W - PAD_RIGHT)
+
+        hits = _paint_timeline(
+            self._rows, self._tag_index,
+            self._hour_start, self._hour_end,
+            width, height,
+            self._row_heights, graph_x0, graph_w,
+        )
+        self._hit_rects = hits
+
+        # ── drag overlay ────────────────────────────────────────────────────
+        drag = getattr(self, "_drag", None)
+        if drag:
+            # Find the matching hit-rect to get bar geometry for overlay
+            iid = drag["interval_id"]
+            for entry in hits:
+                if entry[5] != iid:
+                    continue
+                rect, tag = entry[0], entry[1]
+                # Recompute x for the dragged edge
+                d = drag
+                total_secs = (d["t_end"] - d["t_start"]).total_seconds()
+                frac = (d["current_dt"] - d["t_start"]).total_seconds() / total_secs
+                frac = max(0.0, min(1.0, frac))
+                new_x = d["gx0"] + frac * d["gw"]
+                # Draw a vertical line at the drag position
+                line = NSBezierPath.bezierPath()
+                line.setLineWidth_(2.0)
+                line.moveToPoint_(NSPoint(new_x, rect.origin.y))
+                line.lineToPoint_(NSPoint(new_x, rect.origin.y + rect.size.height))
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    0.0, 0.45, 0.9, 0.9).set()
+                line.stroke()
+                # Time label above the line
+                lbl_attrs = {
+                    NSFontAttributeName: NSFont.boldSystemFontOfSize_(9.0),
+                    NSForegroundColorAttributeName: NSColor.labelColor(),
+                }
+                lbl = NSString.stringWithString_(
+                    d["current_dt"].strftime("%-H:%M"))
+                lbl_sz = lbl.sizeWithAttributes_(lbl_attrs)
+                lbl.drawAtPoint_withAttributes_(
+                    NSPoint(new_x - lbl_sz.width / 2.0,
+                            rect.origin.y + rect.size.height + 2.0),
+                    lbl_attrs)
+                break
+
     @objc.typedSelector(b"v@:@")
     def editInterval_(self, sender):
         hit = getattr(self, "_right_click_hit", None)
         if not hit:
             return
-        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit
+        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit[:6]
         if interval_id is None:
             return
         # Late import — arete is already in sys.modules when timereport runs
