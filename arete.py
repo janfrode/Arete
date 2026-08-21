@@ -906,7 +906,7 @@ class HelpWindow(NSObject):
          'Lists all tags not currently active. '
          'Click one to add it alongside the running tag(s) without stopping them. '
          'Recent tags appear at the top; older tags are in the "Older tags" submenu.'),
-        ('Stop all',
+        ('Stop all tracking',
          'Stops all active tracking immediately. '
          'If "Prompt for annotation when stopping" is enabled, an annotation dialog appears.'),
         ('Annotate active task',
@@ -2257,7 +2257,7 @@ class TimeBar(rumps.App):
 
             self.menu.add(add_menu)
 
-        self.menu.add(rumps.MenuItem("Stop all", callback=self._stop_all))
+        self.menu.add(rumps.MenuItem("Stop all tracking", callback=self._stop_all))
         annotate_item = rumps.MenuItem("Annotate active task", callback=self._annotate_active)
         self._annotate_active_item = annotate_item
         self.menu.add(annotate_item)
