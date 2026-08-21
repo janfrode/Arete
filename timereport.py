@@ -1405,13 +1405,18 @@ def build_summary_table(all_tags, tag_totals, grand_total, target_secs, tag_inde
 # Annotations table
 # ---------------------------------------------------------------------------
 
-def build_annotations_table(intervals, tag_index):
+def build_annotations_table(intervals, tag_index, height_above=0.0):
     """Return (NSView, height) listing all annotated intervals, sorted by time.
 
     Columns: time | ● tag(s) | annotation text
     Returns (None, 0) when there are no annotations in the period.
+
+    height_above : px already consumed by content above this section (timeline,
+                   pie/summary, legend, header, padding).  Used to compute how
+                   much screen space remains so the table only scrolls when the
+                   natural height would exceed the screen.
     """
-    from AppKit import NSTextAlignmentLeft, NSGridCell
+    from AppKit import NSTextAlignmentLeft, NSGridCell, NSScreen
 
     annotated = sorted(
         [inv for inv in intervals if inv.get("annotation")],
@@ -1488,36 +1493,166 @@ def build_annotations_table(intervals, tag_index):
                  + 4.0 + 2.0)
     grid.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
 
-    # Section header label + grid stacked vertically
-    section_lbl = make_label("Annotations", size=11, bold=True, muted=True)
-    section_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-
     wrapper = SummaryTableView.alloc().initWithGrid_csvRows_(grid, csv_rows)
     wrapper.setTranslatesAutoresizingMaskIntoConstraints_(False)
     wrapper.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
 
-    SECTION_H = 18.0
-    GAP       = 4.0
-    total_h   = SECTION_H + GAP + natural_h
+    # Work out how much vertical screen space is available for this section.
+    # TAB_CHROME + FILTER_H + SECTION_H + GAP + bottom_pad are the fixed chrome.
+    SECTION_H  = 18.0
+    GAP        = 4.0
+    BOTTOM_PAD = 12.0
+    CHROME     = 32.0 + 30.0    # tab chrome + filter bar (matches ReportWindowController)
+    screen_h   = NSScreen.mainScreen().visibleFrame().size.height
+    available  = screen_h - CHROME - height_above - SECTION_H - GAP - BOTTOM_PAD
+    available  = max(available, ROW_H_A * 3)   # always show at least 3 rows
+
+    # Only add a scroll view when the natural height exceeds available space.
+    if natural_h <= available:
+        # Fits on screen — show at full height, no scrollbar needed.
+        visible_h = natural_h
+        doc_view  = wrapper
+    else:
+        # Too tall — cap at available space and let the user scroll.
+        visible_h = available
+        sv = NSScrollView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(760, visible_h))
+        )
+        sv.setHasVerticalScroller_(True)
+        sv.setHasHorizontalScroller_(False)
+        sv.setAutohidesScrollers_(True)
+        sv.setBorderType_(0)   # NSNoBorder
+        sv.setDocumentView_(wrapper)
+        sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        sv.heightAnchor().constraintEqualToConstant_(visible_h).setActive_(True)
+        doc_view = sv
+
+    section_lbl = make_label("Annotations", size=11, bold=True, muted=True)
+    section_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+    total_h = SECTION_H + GAP + visible_h
 
     container = NSView.alloc().initWithFrame_(
         NSRect(NSPoint(0, 0), NSSize(760, total_h))
     )
     container.setTranslatesAutoresizingMaskIntoConstraints_(False)
     container.addSubview_(section_lbl)
-    container.addSubview_(wrapper)
+    container.addSubview_(doc_view)
     NSLayoutConstraint.activateConstraints_([
         section_lbl.topAnchor().constraintEqualToAnchor_(container.topAnchor()),
         section_lbl.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
 
-        wrapper.topAnchor().constraintEqualToAnchor_constant_(
-            section_lbl.bottomAnchor(), GAP),
-        wrapper.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
-        wrapper.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
+        doc_view.topAnchor().constraintEqualToAnchor_constant_(section_lbl.bottomAnchor(), GAP),
+        doc_view.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+        doc_view.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
     ])
     container.heightAnchor().constraintEqualToConstant_(total_h).setActive_(True)
 
     return container, total_h
+
+
+# ---------------------------------------------------------------------------
+# Collapsible section header
+# ---------------------------------------------------------------------------
+
+class CollapsibleSection(NSObject):
+    """A disclosure-triangle header that shows/hides a content view.
+
+    Usage
+    -----
+    sec = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+        "Timeline", my_view, 200.0, rebuild_callback
+    )
+    # sec.outer  – the NSView to add to your container (header + content)
+    # sec.total_h – current outer height (changes when toggled)
+    """
+
+    HEADER_H = 22.0
+
+    def initWithTitle_contentView_contentH_onResize_(
+            self, title, content_view, content_h, on_resize):
+        self = objc.super(CollapsibleSection, self).init()
+        if self is None:
+            return None
+        self._title      = title
+        self._content    = content_view
+        self._content_h  = float(content_h)
+        self._on_resize  = on_resize
+        self._expanded   = True
+
+        GAP = 4.0
+        self.total_h = self.HEADER_H + GAP + self._content_h
+
+        # ── outer container ─────────────────────────────────────────────────
+        outer = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(1000, self.total_h))
+        )
+        outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+        # ── disclosure button (triangle + label) ────────────────────────────
+        btn = NSButton.buttonWithTitle_target_action_(
+            f"▾  {title}", self, "toggle:"
+        )
+        btn.setBezelStyle_(0)          # NSBezelStyleSmallSquare → borderless
+        btn.setBordered_(False)
+        btn.setFont_(NSFont.boldSystemFontOfSize_(11))
+        btn.setContentTintColor_(NSColor.secondaryLabelColor())
+        btn.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        self._btn = btn
+
+        content_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+        outer.addSubview_(btn)
+        outer.addSubview_(content_view)
+
+        # ── height constraints ───────────────────────────────────────────────
+        # outer's own height is set by the caller via heightAnchor
+        self._outer_h_con = outer.heightAnchor().constraintEqualToConstant_(
+            self.total_h)
+        self._outer_h_con.setActive_(True)
+
+        # content height constraint — deactivated when collapsed
+        self._content_h_con = content_view.heightAnchor().constraintEqualToConstant_(
+            self._content_h)
+        self._content_h_con.setActive_(True)
+
+        # zero-height constraint used when collapsed (mutually exclusive)
+        self._content_zero_con = content_view.heightAnchor().constraintEqualToConstant_(0)
+        self._content_zero_con.setActive_(False)
+
+        NSLayoutConstraint.activateConstraints_([
+            btn.topAnchor().constraintEqualToAnchor_(outer.topAnchor()),
+            btn.leadingAnchor().constraintEqualToAnchor_(outer.leadingAnchor()),
+            btn.heightAnchor().constraintEqualToConstant_(self.HEADER_H),
+
+            content_view.topAnchor().constraintEqualToAnchor_constant_(
+                btn.bottomAnchor(), GAP),
+            content_view.leadingAnchor().constraintEqualToAnchor_(outer.leadingAnchor()),
+            content_view.trailingAnchor().constraintEqualToAnchor_(outer.trailingAnchor()),
+        ])
+
+        self.outer = outer
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def toggle_(self, sender):
+        GAP = 4.0
+        self._expanded = not self._expanded
+        if self._expanded:
+            self._btn.setTitle_(f"▾  {self._title}")
+            self._content_zero_con.setActive_(False)
+            self._content_h_con.setActive_(True)
+            self._content.setHidden_(False)
+            self.total_h = self.HEADER_H + GAP + self._content_h
+        else:
+            self._btn.setTitle_(f"▸  {self._title}")
+            self._content_h_con.setActive_(False)
+            self._content_zero_con.setActive_(True)
+            self._content.setHidden_(True)
+            self.total_h = self.HEADER_H
+        self._outer_h_con.setConstant_(self.total_h)
+        if self._on_resize:
+            self._on_resize()
 
 
 # ---------------------------------------------------------------------------
@@ -1565,7 +1700,8 @@ def _wrap_tl_scroll(tl_view, tl_h, max_h=TL_MAX_H):
 
 
 def build_report_view(period, offset, on_navigate, workday_hours=7.5,
-                      show_empty_days=True, filter_tags=None, on_refresh=None):
+                      show_empty_days=True, filter_tags=None, on_refresh=None,
+                      on_resize=None):
     """Build and return (NSView, height) for the given period and offset.
 
     period          : "day" | "week" | "month"
@@ -1721,6 +1857,10 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
         )
         return container, 120.0
 
+    PAD     = 12.0
+    GAP_SEC = 8.0
+    header_h = header.fittingSize().height
+
     # --- Timeline view wrapped in a scroll view ---
     tl_row_h = ROW_H // 2 if period == "month" else ROW_H
     tl_view = TimelineView.alloc().initWithRows_tagIndex_hourStart_hourEnd_rowH_startDate_endDate_filterTags_(
@@ -1737,6 +1877,24 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
     legend_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
     legend_view.heightAnchor().constraintEqualToConstant_(float(LegendView.LEGEND_H)).setActive_(True)
 
+    # timeline section = scroll + legend stacked
+    tl_section_inner = NSView.alloc().initWithFrame_(
+        NSRect(NSPoint(0, 0), NSSize(1000, tl_visible_h + GAP_SEC + LegendView.LEGEND_H))
+    )
+    tl_section_inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    tl_section_inner.addSubview_(tl_scroll)
+    tl_section_inner.addSubview_(legend_view)
+    NSLayoutConstraint.activateConstraints_([
+        tl_scroll.topAnchor().constraintEqualToAnchor_(tl_section_inner.topAnchor()),
+        tl_scroll.leadingAnchor().constraintEqualToAnchor_(tl_section_inner.leadingAnchor()),
+        tl_scroll.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
+        legend_view.topAnchor().constraintEqualToAnchor_constant_(tl_scroll.bottomAnchor(), GAP_SEC),
+        legend_view.leadingAnchor().constraintEqualToAnchor_(tl_section_inner.leadingAnchor()),
+        legend_view.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
+    ])
+    tl_inner_h = tl_visible_h + GAP_SEC + LegendView.LEGEND_H
+    tl_section_inner.heightAnchor().constraintEqualToConstant_(tl_inner_h).setActive_(True)
+
     # --- Bottom row: pie (left) + summary table (right, compact) ---
     pie_view = PieView.alloc().initWithAllTags_tagIndex_tagTotals_targetSecs_(
         all_tags, tag_index, tag_totals, target_secs
@@ -1751,67 +1909,97 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
     bottom_row = NSStackView.stackViewWithViews_([])
     bottom_row.setOrientation_(NSUserInterfaceLayoutOrientationHorizontal)
     bottom_row.setSpacing_(24.0)
-    # Align children to the top so the table doesn't get vertically centred
-    # against the pie, which would leave a large blank gap mid-table.
     bottom_row.setAlignment_(NSLayoutAttributeTop)
     bottom_row.addView_inGravity_(pie_view, 1)
     bottom_row.addView_inGravity_(grid, 1)
     bottom_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
-    # --- Annotations table (optional) ---
-    ann_view, ann_h = build_annotations_table(intervals, tag_index)
-
-    # --- Outer container sized exactly to content ---
-    PAD = 12.0
-    GAP = 8.0
-    header_h = header.fittingSize().height
     grid_h   = grid.fittingSize().height
     bottom_h = max(PieView.PIE_SIZE, grid_h)
     bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
-    total_h  = (PAD + header_h + GAP + tl_visible_h + GAP
-                + LegendView.LEGEND_H + GAP + bottom_h
-                + (GAP + ann_h if ann_view else 0)
-                + PAD)
+
+    height_above = (PAD + header_h + GAP_SEC
+                    + CollapsibleSection.HEADER_H + GAP_SEC + tl_inner_h
+                    + GAP_SEC
+                    + CollapsibleSection.HEADER_H + GAP_SEC + bottom_h
+                    + GAP_SEC)
+
+    # --- Annotations table (optional) ---
+    ann_view, ann_h = build_annotations_table(intervals, tag_index, height_above)
+
+    # --- Collapsible sections ------------------------------------------------
+    sections = []   # keep alive
+
+    def _make_resize_cb():
+        def _cb():
+            new_h = (PAD + header_h + GAP_SEC
+                     + sum(s.total_h + GAP_SEC for s in sections)
+                     + PAD)
+            container.setFrameSize_(NSSize(container.frame().size.width, new_h))
+            container_h_con[0].setConstant_(new_h)
+            if on_resize:
+                on_resize(new_h)
+        return _cb
+
+    resize_cb = _make_resize_cb()
+
+    sec_tl  = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+        "Timeline", tl_section_inner, tl_inner_h, resize_cb)
+    sec_sum = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+        "Summary", bottom_row, bottom_h, resize_cb)
+    sections += [sec_tl, sec_sum]
+
+    if ann_view:
+        sec_ann = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+            "Annotations", ann_view, ann_h, resize_cb)
+        sections.append(sec_ann)
+    else:
+        sec_ann = None
+
+    # --- Outer container ----------------------------------------------------
+    total_h = (PAD + header_h + GAP_SEC
+               + sum(s.total_h + GAP_SEC for s in sections)
+               + PAD)
 
     container = NSView.alloc().initWithFrame_(
         NSRect(NSPoint(0, 0), NSSize(1000, total_h))
     )
-    for v in (header, tl_scroll, legend_view, bottom_row):
-        container.addSubview_(v)
-    if ann_view:
-        container.addSubview_(ann_view)
 
+    # mutable cell so the resize closure can update it
+    container_h_con = [container.heightAnchor().constraintEqualToConstant_(total_h)]
+    container_h_con[0].setActive_(True)
+
+    header.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    for s in sections:
+        container.addSubview_(s.outer)
+    container.addSubview_(header)
+
+    # chain: header → sec_tl → sec_sum → [sec_ann]
+    prev_anchor = header.bottomAnchor()
     constraints = [
         header.topAnchor().constraintEqualToAnchor_constant_(container.topAnchor(), PAD),
         header.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         header.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        tl_scroll.topAnchor().constraintEqualToAnchor_constant_(header.bottomAnchor(), GAP),
-        tl_scroll.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        tl_scroll.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        legend_view.topAnchor().constraintEqualToAnchor_constant_(tl_scroll.bottomAnchor(), GAP),
-        legend_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        legend_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        bottom_row.topAnchor().constraintEqualToAnchor_constant_(legend_view.bottomAnchor(), GAP),
-        bottom_row.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        bottom_row.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
     ]
-    if ann_view:
+    for s in sections:
         constraints += [
-            ann_view.topAnchor().constraintEqualToAnchor_constant_(bottom_row.bottomAnchor(), GAP),
-            ann_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-            ann_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
+            s.outer.topAnchor().constraintEqualToAnchor_constant_(prev_anchor, GAP_SEC),
+            s.outer.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
+            s.outer.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
         ]
+        prev_anchor = s.outer.bottomAnchor()
     NSLayoutConstraint.activateConstraints_(constraints)
+
+    # keep section objects alive on the container view
+    objc.setAssociatedObject(container, b"_sections", sections,
+                             objc.OBJC_ASSOCIATION_RETAIN)
 
     return container, total_h
 
 
 def build_custom_report_view(start_date, end_date, on_show,
                              workday_hours=7.5, show_empty_days=True,
-                             filter_tags=None, on_refresh=None):
+                             filter_tags=None, on_refresh=None, on_resize=None):
     """Build report view for an explicit start_date..end_date range.
 
     on_show : callable() — called when the user clicks Show (no-op after first build)
@@ -1915,6 +2103,10 @@ def build_custom_report_view(start_date, end_date, on_show,
             make_label("No tracked time in this period.", size=12, muted=True), 1)
         return container, 120.0
 
+    PAD     = 12.0
+    GAP_SEC = 8.0
+    header_h = header.fittingSize().height
+
     # Use compact row height when range spans more than 7 days
     span = (end_date - start_date).days + 1
     tl_row_h = ROW_H // 2 if span > 7 else ROW_H
@@ -1930,6 +2122,23 @@ def build_custom_report_view(start_date, end_date, on_show,
     legend_view = LegendView.alloc().initWithAllTags_tagIndex_(all_tags, tag_index)
     legend_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
     legend_view.heightAnchor().constraintEqualToConstant_(float(LegendView.LEGEND_H)).setActive_(True)
+
+    tl_section_inner = NSView.alloc().initWithFrame_(
+        NSRect(NSPoint(0, 0), NSSize(1000, tl_visible_h + GAP_SEC + LegendView.LEGEND_H))
+    )
+    tl_section_inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    tl_section_inner.addSubview_(tl_scroll)
+    tl_section_inner.addSubview_(legend_view)
+    NSLayoutConstraint.activateConstraints_([
+        tl_scroll.topAnchor().constraintEqualToAnchor_(tl_section_inner.topAnchor()),
+        tl_scroll.leadingAnchor().constraintEqualToAnchor_(tl_section_inner.leadingAnchor()),
+        tl_scroll.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
+        legend_view.topAnchor().constraintEqualToAnchor_constant_(tl_scroll.bottomAnchor(), GAP_SEC),
+        legend_view.leadingAnchor().constraintEqualToAnchor_(tl_section_inner.leadingAnchor()),
+        legend_view.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
+    ])
+    tl_inner_h = tl_visible_h + GAP_SEC + LegendView.LEGEND_H
+    tl_section_inner.heightAnchor().constraintEqualToConstant_(tl_inner_h).setActive_(True)
 
     pie_view = PieView.alloc().initWithAllTags_tagIndex_tagTotals_targetSecs_(
         all_tags, tag_index, tag_totals, target_secs)
@@ -1948,50 +2157,76 @@ def build_custom_report_view(start_date, end_date, on_show,
     bottom_row.addView_inGravity_(grid, 1)
     bottom_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
-    # --- Annotations table (optional) ---
-    ann_view, ann_h = build_annotations_table(intervals, tag_index)
-
-    PAD, GAP = 12.0, 8.0
-    header_h = header.fittingSize().height
     grid_h   = grid.fittingSize().height
     bottom_h = max(PieView.PIE_SIZE, grid_h)
     bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
-    total_h  = (PAD + header_h + GAP + tl_visible_h + GAP
-                + LegendView.LEGEND_H + GAP + bottom_h
-                + (GAP + ann_h if ann_view else 0)
-                + PAD)
+
+    height_above = (PAD + header_h + GAP_SEC
+                    + CollapsibleSection.HEADER_H + GAP_SEC + tl_inner_h
+                    + GAP_SEC
+                    + CollapsibleSection.HEADER_H + GAP_SEC + bottom_h
+                    + GAP_SEC)
+
+    ann_view, ann_h = build_annotations_table(intervals, tag_index, height_above)
+
+    sections = []
+
+    def _make_resize_cb():
+        def _cb():
+            new_h = (PAD + header_h + GAP_SEC
+                     + sum(s.total_h + GAP_SEC for s in sections)
+                     + PAD)
+            container.setFrameSize_(NSSize(container.frame().size.width, new_h))
+            container_h_con[0].setConstant_(new_h)
+            if on_resize:
+                on_resize(new_h)
+        return _cb
+
+    resize_cb = _make_resize_cb()
+
+    sec_tl  = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+        "Timeline", tl_section_inner, tl_inner_h, resize_cb)
+    sec_sum = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+        "Summary", bottom_row, bottom_h, resize_cb)
+    sections += [sec_tl, sec_sum]
+
+    if ann_view:
+        sec_ann = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
+            "Annotations", ann_view, ann_h, resize_cb)
+        sections.append(sec_ann)
+
+    total_h = (PAD + header_h + GAP_SEC
+               + sum(s.total_h + GAP_SEC for s in sections)
+               + PAD)
 
     container = NSView.alloc().initWithFrame_(
         NSRect(NSPoint(0, 0), NSSize(1000, total_h)))
-    for v in (header, tl_scroll, legend_view, bottom_row):
-        container.addSubview_(v)
-    if ann_view:
-        container.addSubview_(ann_view)
 
+    container_h_con = [container.heightAnchor().constraintEqualToConstant_(total_h)]
+    container_h_con[0].setActive_(True)
+
+    header.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    container.addSubview_(header)
+    for s in sections:
+        container.addSubview_(s.outer)
+
+    prev_anchor = header.bottomAnchor()
     constraints = [
         header.topAnchor().constraintEqualToAnchor_constant_(container.topAnchor(), PAD),
         header.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
         header.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        tl_scroll.topAnchor().constraintEqualToAnchor_constant_(header.bottomAnchor(), GAP),
-        tl_scroll.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        tl_scroll.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        legend_view.topAnchor().constraintEqualToAnchor_constant_(tl_scroll.bottomAnchor(), GAP),
-        legend_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        legend_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
-
-        bottom_row.topAnchor().constraintEqualToAnchor_constant_(legend_view.bottomAnchor(), GAP),
-        bottom_row.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-        bottom_row.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
     ]
-    if ann_view:
+    for s in sections:
         constraints += [
-            ann_view.topAnchor().constraintEqualToAnchor_constant_(bottom_row.bottomAnchor(), GAP),
-            ann_view.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
-            ann_view.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
+            s.outer.topAnchor().constraintEqualToAnchor_constant_(prev_anchor, GAP_SEC),
+            s.outer.leadingAnchor().constraintEqualToAnchor_constant_(container.leadingAnchor(), PAD),
+            s.outer.trailingAnchor().constraintEqualToAnchor_constant_(container.trailingAnchor(), -PAD),
         ]
+        prev_anchor = s.outer.bottomAnchor()
     NSLayoutConstraint.activateConstraints_(constraints)
+
+    objc.setAssociatedObject(container, b"_sections", sections,
+                             objc.OBJC_ASSOCIATION_RETAIN)
     return container, total_h
 
 
@@ -2044,6 +2279,7 @@ class ReportWindowController(NSObject):
     @objc.python_method
     def _rebuild_tab(self, period):
         on_refresh = lambda p=period: self._rebuild_tab(p)
+        on_resize  = lambda new_h, p=period: self._on_section_resize(p, new_h)
         if period == "custom":
             content, content_h = build_custom_report_view(
                 self._custom_start, self._custom_end,
@@ -2052,6 +2288,7 @@ class ReportWindowController(NSObject):
                 show_empty_days=self._show_empty_days,
                 filter_tags=self._filter_tags,
                 on_refresh=on_refresh,
+                on_resize=on_resize,
             )
         else:
             offset = self._offsets[period]
@@ -2062,6 +2299,7 @@ class ReportWindowController(NSObject):
                 show_empty_days=self._show_empty_days,
                 filter_tags=self._filter_tags,
                 on_refresh=on_refresh,
+                on_resize=on_resize,
             )
         self._tab_heights[period] = content_h
 
@@ -2096,6 +2334,12 @@ class ReportWindowController(NSObject):
                 content.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
                 content.heightAnchor().constraintEqualToConstant_(content_h),
             ])
+        self._resize_for_period(period)
+
+    @objc.python_method
+    def _on_section_resize(self, period, new_content_h):
+        """Called by CollapsibleSection toggle; resizes the window without rebuilding data."""
+        self._tab_heights[period] = new_content_h
         self._resize_for_period(period)
 
     @objc.python_method
@@ -2175,6 +2419,7 @@ class ReportWindowController(NSObject):
                     show_empty_days=self._show_empty_days,
                     filter_tags=self._filter_tags,
                     on_refresh=lambda p=period: self._rebuild_tab(p),
+                    on_resize=lambda new_h, p=period: self._on_section_resize(p, new_h),
                 )
             else:
                 offset = self._offsets[period]
@@ -2185,6 +2430,7 @@ class ReportWindowController(NSObject):
                     show_empty_days=self._show_empty_days,
                     filter_tags=self._filter_tags,
                     on_refresh=lambda p=period: self._rebuild_tab(p),
+                    on_resize=lambda new_h, p=period: self._on_section_resize(p, new_h),
                 )
             self._tab_heights[period] = content_h
             built.append((period, content))
