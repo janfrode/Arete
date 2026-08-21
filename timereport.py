@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
 
 from AppKit import (
-    NSApplication, NSApplicationActivationPolicyRegular,
+    NSApplication, NSApplicationActivationPolicyRegular, NSAlert,
     NSWindow, NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskResizable,
     NSBackingStoreBuffered, NSRect, NSPoint, NSSize,
@@ -720,17 +720,39 @@ class TimelineView(NSView):
         NSCursor.pop()
         self._drag = None
 
-        new_dt = drag["current_dt"]
+        new_dt  = drag["current_dt"]
         orig_dt = drag["orig_dt"]
         if new_dt == orig_dt:
             return   # no change — skip the write
 
-        iid = f"@{drag['interval_id']}"
+        iid      = f"@{drag['interval_id']}"
         timew_dt = new_dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
+
+        # Try without :adjust first; only prompt if there's an overlap conflict.
         try:
-            run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
-        except RuntimeError:
-            pass   # silently revert — redraw will restore original
+            run_timew_checked("modify", drag["edge"], iid, timew_dt)
+        except RuntimeError as err:
+            # timew returns non-zero when the change would create an overlap.
+            # Ask the user whether to fix the overlap automatically.
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Overlapping interval")
+            alert.setInformativeText_(
+                "This change overlaps an adjacent interval. "
+                "Adjust the neighbouring interval automatically?"
+            )
+            alert.addButtonWithTitle_("Adjust")   # return value 1000
+            alert.addButtonWithTitle_("Cancel")   # return value 1001
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            response = alert.runModal()
+            if response == 1000:   # NSAlertFirstButtonReturn
+                try:
+                    run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
+                except RuntimeError:
+                    pass   # still failed — fall through to redraw/revert
+            else:
+                # User cancelled — redraw restores original from timew data
+                self.setNeedsDisplay_(True)
+                return
 
         refresh = getattr(self, "_on_refresh", None)
         if refresh is not None:
