@@ -2229,7 +2229,7 @@ class TimeBar(rumps.App):
                 self.menu.add(older_menu)
 
         self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("New tag…", callback=self._new_tag))
+        self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
 
         # "Add tag…" submenu — two levels (recent / older), only shown when tracking
         recent_tags_set = set(recent_tags)
@@ -2237,7 +2237,7 @@ class TimeBar(rumps.App):
         add_older  = [t for t in all_tags if t not in active_tags and t not in recent_tags_set]
 
         if add_recent or add_older:
-            add_menu = rumps.MenuItem("Add tag…")
+            add_menu = rumps.MenuItem("Add additional tag")
             self._add_tag_menu = add_menu
 
             for tag in add_recent:
@@ -2264,10 +2264,10 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
         self.menu.add(rumps.MenuItem("Logbook", callback=self._show_reports))
         self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("Preferences...", callback=self._preferences))
-        self.menu.add(rumps.MenuItem("What's New…", callback=self._show_whats_new))
-        self.menu.add(rumps.MenuItem("Check for updates…", callback=self._check_for_updates))
-        self.menu.add(rumps.MenuItem("Help…", callback=self._show_help))
+        self.menu.add(rumps.MenuItem("Preferences", callback=self._preferences))
+        self.menu.add(rumps.MenuItem("What's New", callback=self._show_whats_new))
+        self.menu.add(rumps.MenuItem("Check for updates", callback=self._check_for_updates))
+        self.menu.add(rumps.MenuItem("Help", callback=self._show_help))
         self.menu.add(rumps.MenuItem("Exit Arête", callback=rumps.quit_application))
 
     # ------------------------------------------------------------------
