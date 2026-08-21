@@ -16,7 +16,7 @@ import sys
 import threading
 import urllib.request
 import importlib.util
-from Foundation import NSDistributedNotificationCenter, NSObject, NSTimer, NSString
+from Foundation import NSDistributedNotificationCenter, NSObject, NSTimer, NSString, NSDate as _NSDate
 from AppKit import (
     NSApplication, NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular, NSFont,
@@ -31,6 +31,8 @@ from AppKit import (
     NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectStateActive, NSFontManager, NSView,
     NSCursor,
+    NSDatePicker, NSDatePickerStyleTextFieldAndStepper,
+    NSDatePickerElementFlagHourMinute,
 )
 from datetime import datetime, timezone, timedelta
 import objc
@@ -1349,6 +1351,13 @@ class TimeScrubberView(NSView):
     def acceptsFirstResponder(self):
         return True
 
+    @objc.python_method
+    def updateStartDt_endDt_(self, start_dt, end_dt):
+        """Update displayed datetimes from outside (e.g. clock picker) and redraw."""
+        self._start_dt = start_dt
+        self._end_dt   = end_dt
+        self.setNeedsDisplay_(True)
+
 
 # ---------------------------------------------------------------------------
 # Edit Interval dialog
@@ -1393,15 +1402,19 @@ class EditIntervalWindow(NSObject):
         stack.setSpacing_(10.0)
         stack.setEdgeInsets_((16.0, 20.0, 16.0, 20.0))
 
+        # ── helpers: datetime <-> NSDate ─────────────────────────────────────
+        def _dt_to_nsdate(dt):
+            return _NSDate.dateWithTimeIntervalSince1970_(dt.timestamp())
+
         # ── time scrubber ────────────────────────────────────────────────────
         def _on_scrub_change(s_dt, e_dt):
-            # Keep our copies in sync so save_() can read them directly
+            # Keep datetimes in sync so save_() can read them directly
             self._start_dt = s_dt
             self._end_dt   = e_dt
-            # Update the text labels
-            self.lbl_start_val.setStringValue_(s_dt.strftime(self._TIME_FMT))
+            # Update the clock pickers
+            self.dp_start.setDateValue_(_dt_to_nsdate(s_dt))
             if e_dt:
-                self.lbl_end_val.setStringValue_(e_dt.strftime(self._TIME_FMT))
+                self.dp_end.setDateValue_(_dt_to_nsdate(e_dt))
 
         is_active = self._end_dt is None
         self.scrubber = TimeScrubberView.alloc(
@@ -1416,10 +1429,20 @@ class EditIntervalWindow(NSObject):
             TimeScrubberView.VIEW_H).setActive_(True)
         stack.addView_inGravity_(self.scrubber, 1)
 
-        # ── read-only time labels (updated by scrubber) ──────────────────────
+        # ── clock pickers for start / end ─────────────────────────────────
         LABEL_W = 46
 
-        def _time_row(prefix, dt_or_none):
+        def _make_clock_picker(dt_or_none):
+            dp = NSDatePicker.alloc().initWithFrame_(
+                NSRect(NSPoint(0, 0), NSSize(90, 24)))
+            dp.setDatePickerStyle_(NSDatePickerStyleTextFieldAndStepper)
+            dp.setDatePickerElements_(NSDatePickerElementFlagHourMinute)
+            if dt_or_none:
+                dp.setDateValue_(_dt_to_nsdate(dt_or_none))
+            dp.setEnabled_(dt_or_none is not None)
+            return dp
+
+        def _picker_row(prefix, dp):
             row = NSStackView.stackViewWithViews_([])
             row.setOrientation_(0)
             row.setAlignment_(8)
@@ -1430,19 +1453,20 @@ class EditIntervalWindow(NSObject):
             key_lbl.setAlignment_(1)
             key_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
             key_lbl.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
-            val_lbl = NSTextField.labelWithString_(
-                dt_or_none.strftime(self._TIME_FMT) if dt_or_none else "—  (still active)"
-            )
-            val_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(11, 0))
-            val_lbl.setSelectable_(True)
             row.addView_inGravity_(key_lbl, 1)
-            row.addView_inGravity_(val_lbl, 1)
-            return row, val_lbl
+            row.addView_inGravity_(dp, 1)
+            return row
 
-        start_row, self.lbl_start_val = _time_row("Start:", self._start_dt)
-        end_row,   self.lbl_end_val   = _time_row("End:",   self._end_dt)
-        stack.addView_inGravity_(start_row, 1)
-        stack.addView_inGravity_(end_row, 1)
+        self.dp_start = _make_clock_picker(self._start_dt)
+        self.dp_start.setTarget_(self)
+        self.dp_start.setAction_("pickerStartChanged:")
+
+        self.dp_end = _make_clock_picker(self._end_dt)
+        self.dp_end.setTarget_(self)
+        self.dp_end.setAction_("pickerEndChanged:")
+
+        stack.addView_inGravity_(_picker_row("Start:", self.dp_start), 1)
+        stack.addView_inGravity_(_picker_row("End:",   self.dp_end),   1)
 
         # ── thin separator ───────────────────────────────────────────────────
         sep = NSBox.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(10, 1)))
@@ -1501,6 +1525,36 @@ class EditIntervalWindow(NSObject):
         self.window = window
         window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+    @objc.typedSelector(b"v@:@")
+    def pickerStartChanged_(self, sender):
+        """Called when the start clock picker value changes."""
+        picked = datetime.fromtimestamp(sender.dateValue().timeIntervalSince1970())
+        new_dt = self._start_dt.replace(
+            hour=picked.hour, minute=picked.minute, second=0, microsecond=0)
+        # Don't let start cross end
+        if self._end_dt and new_dt >= self._end_dt:
+            new_dt = self._end_dt - timedelta(minutes=1)
+            self.dp_start.setDateValue_(
+                _NSDate.dateWithTimeIntervalSince1970_(new_dt.timestamp()))
+        self._start_dt = new_dt
+        self.scrubber.updateStartDt_endDt_(self._start_dt, self._end_dt)
+
+    @objc.typedSelector(b"v@:@")
+    def pickerEndChanged_(self, sender):
+        """Called when the end clock picker value changes."""
+        if self._end_dt is None:
+            return
+        picked = datetime.fromtimestamp(sender.dateValue().timeIntervalSince1970())
+        new_dt = self._end_dt.replace(
+            hour=picked.hour, minute=picked.minute, second=0, microsecond=0)
+        # Don't let end cross start
+        if new_dt <= self._start_dt:
+            new_dt = self._start_dt + timedelta(minutes=1)
+            self.dp_end.setDateValue_(
+                _NSDate.dateWithTimeIntervalSince1970_(new_dt.timestamp()))
+        self._end_dt = new_dt
+        self.scrubber.updateStartDt_endDt_(self._start_dt, self._end_dt)
 
     @objc.typedSelector(b"v@:@")
     def cancel_(self, sender):

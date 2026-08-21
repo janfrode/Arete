@@ -1260,11 +1260,13 @@ class SummaryTableView(NSView):
         self._csv_rows = csv_rows
         grid.setTranslatesAutoresizingMaskIntoConstraints_(False)
         self.addSubview_(grid)
+        # Pin top/leading/trailing only — height is set by the grid's own
+        # heightAnchor constraint.  No bottomAnchor pin because the parent
+        # (SummaryTableView) is frame-based when used as a scroll-view document.
         NSLayoutConstraint.activateConstraints_([
             grid.topAnchor().constraintEqualToAnchor_(self.topAnchor()),
             grid.leadingAnchor().constraintEqualToAnchor_(self.leadingAnchor()),
             grid.trailingAnchor().constraintEqualToAnchor_(self.trailingAnchor()),
-            grid.bottomAnchor().constraintEqualToAnchor_(self.bottomAnchor()),
         ])
         return self
 
@@ -1406,15 +1408,16 @@ def build_summary_table(all_tags, tag_totals, grand_total, target_secs, tag_inde
 # ---------------------------------------------------------------------------
 
 def build_annotations_table(intervals, tag_index, height_above=0.0):
-    """Return (NSView, height) listing all annotated intervals, sorted by time.
+    """Return (scroll_view, natural_h) for the annotations table.
 
     Columns: time | ● tag(s) | annotation text
     Returns (None, 0) when there are no annotations in the period.
 
-    height_above : px already consumed by content above this section (timeline,
-                   pie/summary, legend, header, padding).  Used to compute how
-                   much screen space remains so the table only scrolls when the
-                   natural height would exceed the screen.
+    Always returns an NSScrollView whose document view is the full-height
+    SummaryTableView.  The scroll view's visible height is initially capped to
+    fit the screen (height_above is used to compute the remaining space), but
+    the caller can update it at any time via CollapsibleSection.set_content_h().
+    autohidesScrollers=True means the scrollbar only appears when needed.
     """
     from AppKit import NSTextAlignmentLeft, NSGridCell, NSScreen
 
@@ -1493,62 +1496,35 @@ def build_annotations_table(intervals, tag_index, height_above=0.0):
                  + 4.0 + 2.0)
     grid.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
 
+    # wrapper is the NSScrollView's document view — must be frame-based (TAMSIC=True)
+    # so the scroll view can set its frame directly.  The grid inside uses Auto Layout.
     wrapper = SummaryTableView.alloc().initWithGrid_csvRows_(grid, csv_rows)
-    wrapper.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    wrapper.heightAnchor().constraintEqualToConstant_(natural_h).setActive_(True)
+    wrapper.setFrameSize_(NSSize(760, natural_h))
 
-    # Work out how much vertical screen space is available for this section.
-    # TAB_CHROME + FILTER_H + SECTION_H + GAP + bottom_pad are the fixed chrome.
-    SECTION_H  = 18.0
-    GAP        = 4.0
+    # Compute initial visible height: full natural height unless it would push
+    # the window off screen, in which case cap it (scrollbar appears).
+    CHROME     = 32.0 + 30.0   # tab chrome + filter bar
     BOTTOM_PAD = 12.0
-    CHROME     = 32.0 + 30.0    # tab chrome + filter bar (matches ReportWindowController)
     screen_h   = NSScreen.mainScreen().visibleFrame().size.height
-    available  = screen_h - CHROME - height_above - SECTION_H - GAP - BOTTOM_PAD
+    available  = screen_h - CHROME - height_above - BOTTOM_PAD
     available  = max(available, ROW_H_A * 3)   # always show at least 3 rows
+    visible_h  = min(natural_h, available)
 
-    # Only add a scroll view when the natural height exceeds available space.
-    if natural_h <= available:
-        # Fits on screen — show at full height, no scrollbar needed.
-        visible_h = natural_h
-        doc_view  = wrapper
-    else:
-        # Too tall — cap at available space and let the user scroll.
-        visible_h = available
-        sv = NSScrollView.alloc().initWithFrame_(
-            NSRect(NSPoint(0, 0), NSSize(760, visible_h))
-        )
-        sv.setHasVerticalScroller_(True)
-        sv.setHasHorizontalScroller_(False)
-        sv.setAutohidesScrollers_(True)
-        sv.setBorderType_(0)   # NSNoBorder
-        sv.setDocumentView_(wrapper)
-        sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        sv.heightAnchor().constraintEqualToConstant_(visible_h).setActive_(True)
-        doc_view = sv
-
-    section_lbl = make_label("Annotations", size=11, bold=True, muted=True)
-    section_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-
-    total_h = SECTION_H + GAP + visible_h
-
-    container = NSView.alloc().initWithFrame_(
-        NSRect(NSPoint(0, 0), NSSize(760, total_h))
+    sv = NSScrollView.alloc().initWithFrame_(
+        NSRect(NSPoint(0, 0), NSSize(760, visible_h))
     )
-    container.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    container.addSubview_(section_lbl)
-    container.addSubview_(doc_view)
-    NSLayoutConstraint.activateConstraints_([
-        section_lbl.topAnchor().constraintEqualToAnchor_(container.topAnchor()),
-        section_lbl.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+    sv.setHasVerticalScroller_(True)
+    sv.setHasHorizontalScroller_(False)
+    sv.setAutohidesScrollers_(True)   # scrollbar only appears when content > visible area
+    sv.setBorderType_(0)              # NSNoBorder
+    sv.setDocumentView_(wrapper)
+    sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    # NOTE: no heightAnchor constraint here — CollapsibleSection sets and updates
+    # _content_h_con on this view directly, so a fixed constraint here would fight it.
 
-        doc_view.topAnchor().constraintEqualToAnchor_constant_(section_lbl.bottomAnchor(), GAP),
-        doc_view.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
-        doc_view.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
-    ])
-    container.heightAnchor().constraintEqualToConstant_(total_h).setActive_(True)
-
-    return container, total_h
+    # Return the scroll view, its initial visible height, and the full natural
+    # height of the content so callers can later grow it up to natural_h.
+    return sv, visible_h, natural_h
 
 
 # ---------------------------------------------------------------------------
@@ -1634,6 +1610,23 @@ class CollapsibleSection(NSObject):
         self.outer = outer
         return self
 
+    @objc.python_method
+    def set_content_h(self, new_h):
+        """Update the content height without triggering the resize callback.
+
+        Used by the outer resize closure to grow/shrink the annotations section
+        when other sections are collapsed/expanded.  If the section is currently
+        collapsed the stored height is updated but the outer height stays at
+        HEADER_H until the user expands again.
+        """
+        GAP = 4.0
+        new_h = float(new_h)
+        self._content_h = new_h
+        self._content_h_con.setConstant_(new_h)
+        if self._expanded:
+            self.total_h = self.HEADER_H + GAP + new_h
+            self._outer_h_con.setConstant_(self.total_h)
+
     @objc.typedSelector(b"v@:@")
     def toggle_(self, sender):
         GAP = 4.0
@@ -1701,7 +1694,7 @@ def _wrap_tl_scroll(tl_view, tl_h, max_h=TL_MAX_H):
 
 def build_report_view(period, offset, on_navigate, workday_hours=7.5,
                       show_empty_days=True, filter_tags=None, on_refresh=None,
-                      on_resize=None):
+                      on_resize=None, out_resize_cb=None):
     """Build and return (NSView, height) for the given period and offset.
 
     period          : "day" | "week" | "month"
@@ -1893,7 +1886,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
         legend_view.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
     ])
     tl_inner_h = tl_visible_h + GAP_SEC + LegendView.LEGEND_H
-    tl_section_inner.heightAnchor().constraintEqualToConstant_(tl_inner_h).setActive_(True)
+    # No heightAnchor here — CollapsibleSection owns this view's height via _content_h_con.
 
     # --- Bottom row: pie (left) + summary table (right, compact) ---
     pie_view = PieView.alloc().initWithAllTags_tagIndex_tagTotals_targetSecs_(
@@ -1916,7 +1909,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
 
     grid_h   = grid.fittingSize().height
     bottom_h = max(PieView.PIE_SIZE, grid_h)
-    bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
+    # No heightAnchor here — CollapsibleSection owns this view's height via _content_h_con.
 
     height_above = (PAD + header_h + GAP_SEC
                     + CollapsibleSection.HEADER_H + GAP_SEC + tl_inner_h
@@ -1925,20 +1918,53 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
                     + GAP_SEC)
 
     # --- Annotations table (optional) ---
-    ann_view, ann_h = build_annotations_table(intervals, tag_index, height_above)
+    ann_result = build_annotations_table(intervals, tag_index, height_above)
+    if ann_result[0] is not None:
+        ann_view, ann_h, ann_natural_h = ann_result
+    else:
+        ann_view, ann_h, ann_natural_h = None, 0.0, 0.0
 
     # --- Collapsible sections ------------------------------------------------
     sections = []   # keep alive
+    sec_ann_ref = [None]  # mutable cell for closure
 
     def _make_resize_cb():
-        def _cb():
+        def _cb(avail_h=None):
+            # If there's an annotations section, grow/shrink it to fill the
+            # available space.  avail_h is the window content height available
+            # to us; when None we compute from the screen (section-toggle case).
+            from_window_resize = avail_h is not None
+            if sec_ann_ref[0] is not None:
+                # Everything in the container except sec_ann's scroll-view content:
+                # top PAD + header + GAP + other sections (each with trailing GAP_SEC)
+                # + sec_ann's own HEADER_H + GAP + trailing GAP_SEC + bottom PAD
+                fixed_h = (PAD + header_h + GAP_SEC
+                           + sum(s.total_h + GAP_SEC
+                                 for s in sections if s is not sec_ann_ref[0])
+                           + CollapsibleSection.HEADER_H + 4.0   # sec_ann header + inner GAP
+                           + GAP_SEC + PAD)                       # trailing gap + bottom pad
+                if not from_window_resize:
+                    from AppKit import NSScreen as _NSS
+                    screen_h   = _NSS.mainScreen().visibleFrame().size.height
+                    CHROME     = 32.0 + 30.0
+                    BOTTOM_PAD = 12.0
+                    avail_h    = screen_h - CHROME - BOTTOM_PAD
+                avail     = avail_h - fixed_h
+                avail     = max(avail, 18.0 * 3)
+                new_ann_h = min(ann_natural_h, avail)
+                sec_ann_ref[0].set_content_h(new_ann_h)
+
             new_h = (PAD + header_h + GAP_SEC
                      + sum(s.total_h + GAP_SEC for s in sections)
                      + PAD)
             container.setFrameSize_(NSSize(container.frame().size.width, new_h))
             container_h_con[0].setConstant_(new_h)
-            if on_resize:
+            # Don't call on_resize when responding to a window resize — we're
+            # already inside it and don't want to resize the window again.
+            if on_resize and not from_window_resize:
                 on_resize(new_h)
+        if out_resize_cb is not None:
+            out_resize_cb[0] = _cb
         return _cb
 
     resize_cb = _make_resize_cb()
@@ -1953,6 +1979,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
         sec_ann = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
             "Annotations", ann_view, ann_h, resize_cb)
         sections.append(sec_ann)
+        sec_ann_ref[0] = sec_ann
     else:
         sec_ann = None
 
@@ -1999,7 +2026,8 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
 
 def build_custom_report_view(start_date, end_date, on_show,
                              workday_hours=7.5, show_empty_days=True,
-                             filter_tags=None, on_refresh=None, on_resize=None):
+                             filter_tags=None, on_refresh=None, on_resize=None,
+                             out_resize_cb=None):
     """Build report view for an explicit start_date..end_date range.
 
     on_show : callable() — called when the user clicks Show (no-op after first build)
@@ -2138,7 +2166,7 @@ def build_custom_report_view(start_date, end_date, on_show,
         legend_view.trailingAnchor().constraintEqualToAnchor_(tl_section_inner.trailingAnchor()),
     ])
     tl_inner_h = tl_visible_h + GAP_SEC + LegendView.LEGEND_H
-    tl_section_inner.heightAnchor().constraintEqualToConstant_(tl_inner_h).setActive_(True)
+    # No heightAnchor here — CollapsibleSection owns this view's height via _content_h_con.
 
     pie_view = PieView.alloc().initWithAllTags_tagIndex_tagTotals_targetSecs_(
         all_tags, tag_index, tag_totals, target_secs)
@@ -2159,7 +2187,7 @@ def build_custom_report_view(start_date, end_date, on_show,
 
     grid_h   = grid.fittingSize().height
     bottom_h = max(PieView.PIE_SIZE, grid_h)
-    bottom_row.heightAnchor().constraintEqualToConstant_(bottom_h).setActive_(True)
+    # No heightAnchor here — CollapsibleSection owns this view's height via _content_h_con.
 
     height_above = (PAD + header_h + GAP_SEC
                     + CollapsibleSection.HEADER_H + GAP_SEC + tl_inner_h
@@ -2167,19 +2195,44 @@ def build_custom_report_view(start_date, end_date, on_show,
                     + CollapsibleSection.HEADER_H + GAP_SEC + bottom_h
                     + GAP_SEC)
 
-    ann_view, ann_h = build_annotations_table(intervals, tag_index, height_above)
+    ann_result = build_annotations_table(intervals, tag_index, height_above)
+    if ann_result[0] is not None:
+        ann_view, ann_h, ann_natural_h = ann_result
+    else:
+        ann_view, ann_h, ann_natural_h = None, 0.0, 0.0
 
     sections = []
+    sec_ann_ref = [None]
 
     def _make_resize_cb():
-        def _cb():
+        def _cb(avail_h=None):
+            from_window_resize = avail_h is not None
+            if sec_ann_ref[0] is not None:
+                fixed_h = (PAD + header_h + GAP_SEC
+                           + sum(s.total_h + GAP_SEC
+                                 for s in sections if s is not sec_ann_ref[0])
+                           + CollapsibleSection.HEADER_H + 4.0
+                           + GAP_SEC + PAD)
+                if not from_window_resize:
+                    from AppKit import NSScreen as _NSS
+                    screen_h   = _NSS.mainScreen().visibleFrame().size.height
+                    CHROME     = 32.0 + 30.0
+                    BOTTOM_PAD = 12.0
+                    avail_h    = screen_h - CHROME - BOTTOM_PAD
+                avail      = avail_h - fixed_h
+                avail      = max(avail, 18.0 * 3)
+                new_ann_h  = min(ann_natural_h, avail)
+                sec_ann_ref[0].set_content_h(new_ann_h)
+
             new_h = (PAD + header_h + GAP_SEC
                      + sum(s.total_h + GAP_SEC for s in sections)
                      + PAD)
             container.setFrameSize_(NSSize(container.frame().size.width, new_h))
             container_h_con[0].setConstant_(new_h)
-            if on_resize:
+            if on_resize and not from_window_resize:
                 on_resize(new_h)
+        if out_resize_cb is not None:
+            out_resize_cb[0] = _cb
         return _cb
 
     resize_cb = _make_resize_cb()
@@ -2194,6 +2247,7 @@ def build_custom_report_view(start_date, end_date, on_show,
         sec_ann = CollapsibleSection.alloc().initWithTitle_contentView_contentH_onResize_(
             "Annotations", ann_view, ann_h, resize_cb)
         sections.append(sec_ann)
+        sec_ann_ref[0] = sec_ann
 
     total_h = (PAD + header_h + GAP_SEC
                + sum(s.total_h + GAP_SEC for s in sections)
@@ -2255,9 +2309,12 @@ class ReportWindowController(NSObject):
         self._filter_tags = None          # None = show all; set = active filter
         self._all_known_tags = []         # populated in _build_window
         self._filter_checkboxes = {}      # tag -> NSButton
-        self._tab_items    = {}  # period -> NSTabViewItem
-        self._tab_wrappers = {}  # period -> persistent NSView wrapper
-        self._tab_heights  = {}  # period -> content_h
+        self._tab_items          = {}  # period -> NSTabViewItem
+        self._tab_wrappers       = {}  # period -> persistent NSView wrapper (tab item view)
+        self._tab_scrollviews    = {}  # period -> NSScrollView inside wrapper
+        self._tab_heights        = {}  # period -> content_h
+        self._tab_content_h_cons = {}  # period -> doc_view heightAnchor constraint
+        self._tab_resize_cbs     = {}  # period -> _cb(avail_h=) from build_*_view
         self._TAB_CHROME = 32
         self._win_w = 1000.0
         # Custom range state — default to last 30 days
@@ -2280,6 +2337,7 @@ class ReportWindowController(NSObject):
     def _rebuild_tab(self, period):
         on_refresh = lambda p=period: self._rebuild_tab(p)
         on_resize  = lambda new_h, p=period: self._on_section_resize(p, new_h)
+        out_cb     = [None]
         if period == "custom":
             content, content_h = build_custom_report_view(
                 self._custom_start, self._custom_end,
@@ -2289,6 +2347,7 @@ class ReportWindowController(NSObject):
                 filter_tags=self._filter_tags,
                 on_refresh=on_refresh,
                 on_resize=on_resize,
+                out_resize_cb=out_cb,
             )
         else:
             offset = self._offsets[period]
@@ -2300,46 +2359,45 @@ class ReportWindowController(NSObject):
                 filter_tags=self._filter_tags,
                 on_refresh=on_refresh,
                 on_resize=on_resize,
+                out_resize_cb=out_cb,
             )
+        if out_cb[0] is not None:
+            self._tab_resize_cbs[period] = out_cb[0]
         self._tab_heights[period] = content_h
 
-        wrapper = self._tab_wrappers[period]
-        if period == "custom":
-            PICKER_H = getattr(self, "_custom_picker_h", 32.0)
-            picker_bar = getattr(self, "_custom_picker_bar", None)
-            for old in list(wrapper.subviews()):
-                old.removeFromSuperview()
-            if picker_bar is not None:
-                wrapper.addSubview_(picker_bar)
-            content.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            wrapper.addSubview_(content)
-            NSLayoutConstraint.activateConstraints_([
-                picker_bar.topAnchor().constraintEqualToAnchor_(wrapper.topAnchor()),
-                picker_bar.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
-                picker_bar.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
-                picker_bar.heightAnchor().constraintEqualToConstant_(PICKER_H),
-                content.topAnchor().constraintEqualToAnchor_constant_(picker_bar.bottomAnchor(), 0),
-                content.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
-                content.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
-                content.heightAnchor().constraintEqualToConstant_(content_h),
-            ])
-        else:
-            for old in list(wrapper.subviews()):
-                old.removeFromSuperview()
-            content.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            wrapper.addSubview_(content)
-            NSLayoutConstraint.activateConstraints_([
-                content.topAnchor().constraintEqualToAnchor_(wrapper.topAnchor()),
-                content.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
-                content.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
-                content.heightAnchor().constraintEqualToConstant_(content_h),
-            ])
+        # Content goes into the scroll view's document view, not the wrapper directly.
+        tab_sv  = self._tab_scrollviews[period]
+        doc_view = tab_sv.documentView()
+        for old in list(doc_view.subviews()):
+            old.removeFromSuperview()
+        # Keep doc_view frame in sync with the new content height.
+        doc_view.setFrameSize_(NSSize(doc_view.frame().size.width, content_h))
+        content.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        doc_view.addSubview_(content)
+        h_con = content.heightAnchor().constraintEqualToConstant_(content_h)
+        NSLayoutConstraint.activateConstraints_([
+            content.topAnchor().constraintEqualToAnchor_(doc_view.topAnchor()),
+            content.leadingAnchor().constraintEqualToAnchor_(doc_view.leadingAnchor()),
+            content.trailingAnchor().constraintEqualToAnchor_(doc_view.trailingAnchor()),
+            h_con,
+        ])
+        self._tab_content_h_cons[period] = h_con
         self._resize_for_period(period)
 
     @objc.python_method
     def _on_section_resize(self, period, new_content_h):
         """Called by CollapsibleSection toggle; resizes the window without rebuilding data."""
         self._tab_heights[period] = new_content_h
+        # Update the content-height constraint and doc_view frame so the scroll
+        # view knows the document's true height.
+        con = self._tab_content_h_cons.get(period)
+        if con is not None:
+            con.setConstant_(new_content_h)
+        tab_sv = self._tab_scrollviews.get(period)
+        if tab_sv is not None:
+            doc = tab_sv.documentView()
+            if doc is not None:
+                doc.setFrameSize_(NSSize(doc.frame().size.width, new_content_h))
         self._resize_for_period(period)
 
     @objc.python_method
@@ -2411,6 +2469,7 @@ class ReportWindowController(NSObject):
         # Build all tab contents first so we know each tab's required height
         built = []
         for period in periods:
+            out_cb = [None]
             if period == "custom":
                 content, content_h = build_custom_report_view(
                     self._custom_start, self._custom_end,
@@ -2420,6 +2479,7 @@ class ReportWindowController(NSObject):
                     filter_tags=self._filter_tags,
                     on_refresh=lambda p=period: self._rebuild_tab(p),
                     on_resize=lambda new_h, p=period: self._on_section_resize(p, new_h),
+                    out_resize_cb=out_cb,
                 )
             else:
                 offset = self._offsets[period]
@@ -2431,8 +2491,11 @@ class ReportWindowController(NSObject):
                     filter_tags=self._filter_tags,
                     on_refresh=lambda p=period: self._rebuild_tab(p),
                     on_resize=lambda new_h, p=period: self._on_section_resize(p, new_h),
+                    out_resize_cb=out_cb,
                 )
             self._tab_heights[period] = content_h
+            if out_cb[0] is not None:
+                self._tab_resize_cbs[period] = out_cb[0]
             built.append((period, content))
 
         # Filter bar height
@@ -2569,10 +2632,42 @@ class ReportWindowController(NSObject):
         self._custom_picker_h = PICKER_H
 
         for period, content in built:
+            # wrapper = the NSView that NSTabViewItem owns (fills the tab chrome)
             wrapper = NSView.alloc().initWithFrame_(
                 NSRect(NSPoint(0, 0), NSSize(self._win_w, self._tab_heights[period]))
             )
             wrapper.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+
+            # doc_view = frame-based NSView that NSScrollView uses as its document view.
+            # It must NOT use Auto Layout (TAMSIC=True, the default) so the scroll view
+            # can set its frame directly.  content lives inside it and can use AL freely.
+            content_h = self._tab_heights[period]
+            doc_view = NSView.alloc().initWithFrame_(
+                NSRect(NSPoint(0, 0), NSSize(self._win_w, content_h))
+            )
+            # doc_view stays frame-based — do NOT call setTranslatesAutoresizingMaskIntoConstraints_(False)
+            content.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            doc_view.addSubview_(content)
+            h_con = content.heightAnchor().constraintEqualToConstant_(content_h)
+            NSLayoutConstraint.activateConstraints_([
+                content.topAnchor().constraintEqualToAnchor_(doc_view.topAnchor()),
+                content.leadingAnchor().constraintEqualToAnchor_(doc_view.leadingAnchor()),
+                content.trailingAnchor().constraintEqualToAnchor_(doc_view.trailingAnchor()),
+                h_con,
+            ])
+            self._tab_content_h_cons[period] = h_con
+
+            # tab_sv = scroll view that fills the wrapper (or the area below picker_bar)
+            tab_sv = NSScrollView.alloc().initWithFrame_(
+                NSRect(NSPoint(0, 0), NSSize(self._win_w, content_h))
+            )
+            tab_sv.setHasVerticalScroller_(True)
+            tab_sv.setHasHorizontalScroller_(False)
+            tab_sv.setAutohidesScrollers_(True)
+            tab_sv.setBorderType_(0)   # NSNoBorder
+            tab_sv.setDocumentView_(doc_view)
+            tab_sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            self._tab_scrollviews[period] = tab_sv
 
             if period == "custom":
                 dp_from = NSDatePicker.alloc().initWithFrame_(
@@ -2609,27 +2704,25 @@ class ReportWindowController(NSObject):
                 picker_bar.addView_inGravity_(btn_show, 1)
 
                 self._custom_picker_bar = picker_bar
-                content.setTranslatesAutoresizingMaskIntoConstraints_(False)
                 wrapper.addSubview_(picker_bar)
-                wrapper.addSubview_(content)
+                wrapper.addSubview_(tab_sv)
                 NSLayoutConstraint.activateConstraints_([
                     picker_bar.topAnchor().constraintEqualToAnchor_(wrapper.topAnchor()),
                     picker_bar.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
                     picker_bar.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
                     picker_bar.heightAnchor().constraintEqualToConstant_(PICKER_H),
-                    content.topAnchor().constraintEqualToAnchor_constant_(picker_bar.bottomAnchor(), 0),
-                    content.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
-                    content.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
-                    content.heightAnchor().constraintEqualToConstant_(self._tab_heights[period]),
+                    tab_sv.topAnchor().constraintEqualToAnchor_constant_(picker_bar.bottomAnchor(), 0),
+                    tab_sv.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
+                    tab_sv.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
+                    tab_sv.bottomAnchor().constraintEqualToAnchor_(wrapper.bottomAnchor()),
                 ])
             else:
-                content.setTranslatesAutoresizingMaskIntoConstraints_(False)
-                wrapper.addSubview_(content)
+                wrapper.addSubview_(tab_sv)
                 NSLayoutConstraint.activateConstraints_([
-                    content.topAnchor().constraintEqualToAnchor_(wrapper.topAnchor()),
-                    content.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
-                    content.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
-                    content.heightAnchor().constraintEqualToConstant_(self._tab_heights[period]),
+                    tab_sv.topAnchor().constraintEqualToAnchor_(wrapper.topAnchor()),
+                    tab_sv.leadingAnchor().constraintEqualToAnchor_(wrapper.leadingAnchor()),
+                    tab_sv.trailingAnchor().constraintEqualToAnchor_(wrapper.trailingAnchor()),
+                    tab_sv.bottomAnchor().constraintEqualToAnchor_(wrapper.bottomAnchor()),
                 ])
 
             item = NSTabViewItem.alloc().initWithIdentifier_(period)
@@ -2735,6 +2828,20 @@ class ReportWindowController(NSObject):
         self._resize_for_period(period)
 
     # --- Window delegate ---
+    @objc.typedSelector(b"v@:@")
+    def windowDidResize_(self, notification):
+        """Resize annotations section to match available window height."""
+        period = self._tab_view.selectedTabViewItem().identifier()
+        cb = self._tab_resize_cbs.get(period)
+        if cb is None:
+            return
+        # Available height for the content inside the tab scroll view.
+        content_rect = self._tab_view.contentRect()
+        avail_h = content_rect.size.height
+        if period == "custom":
+            avail_h -= getattr(self, "_custom_picker_h", 32.0)
+        cb(avail_h=avail_h)
+
     @objc.typedSelector(b"v@:@")
     def windowWillClose_(self, notification):
         # When run standalone (own process), quit cleanly.
