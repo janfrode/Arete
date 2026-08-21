@@ -640,6 +640,7 @@ class TimelineView(NSView):
     def rightMouseDown_(self, event):
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
         self._right_click_hit = self._hit_at_point(pt)
+        hit = self._right_click_hit is not None
 
         menu = NSMenu.alloc().initWithTitle_("")
 
@@ -647,8 +648,15 @@ class TimelineView(NSView):
             "Annotate…", "annotateInterval:", ""
         )
         annotate_item.setTarget_(self)
-        annotate_item.setEnabled_(self._right_click_hit is not None)
+        annotate_item.setEnabled_(hit)
         menu.addItem_(annotate_item)
+
+        edit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Edit interval…", "editInterval:", ""
+        )
+        edit_item.setTarget_(self)
+        edit_item.setEnabled_(hit)
+        menu.addItem_(edit_item)
 
         sep = NSMenuItem.separatorItem()
         menu.addItem_(sep)
@@ -693,6 +701,51 @@ class TimelineView(NSView):
             tags_hint,
         )
         self._annotate_ctrl = ctrl  # keep alive
+        ctrl.show()
+
+    @objc.typedSelector(b"v@:@")
+    def editInterval_(self, sender):
+        hit = getattr(self, "_right_click_hit", None)
+        if not hit:
+            return
+        _rect, tag, start_dt, end_dt, _annotation, interval_id = hit
+        if interval_id is None:
+            return
+        # Late import — arete is already in sys.modules when timereport runs
+        import sys as _sys
+        arete_mod = _sys.modules.get("arete") or _sys.modules.get("__main__")
+        EditIntervalWindow = getattr(arete_mod, "EditIntervalWindow", None)
+        if EditIntervalWindow is None:
+            return
+        # Re-fetch fresh data from timew (hit-rect data may be stale)
+        tags = [tag]
+        try:
+            out = run_timew("export", f"@{interval_id}")
+            if out:
+                data = json.loads(out)
+                if data:
+                    inv = data[0]
+                    tags = inv.get("tags") or [tag]
+                    tz = local_tz()
+                    start_dt = parse_utc(inv["start"]).astimezone(tz)
+                    raw_end  = inv.get("end")
+                    end_dt   = parse_utc(raw_end).astimezone(tz) if raw_end else None
+        except Exception:
+            pass
+        def _on_edit_save():
+            # Full tab rebuild if we have the hook; fall back to simple redraw
+            refresh = getattr(self, "_on_refresh", None)
+            if refresh is not None:
+                refresh()
+            else:
+                self.setNeedsDisplay_(True)
+
+        ctrl = EditIntervalWindow.alloc(
+        ).initWithIntervalId_startDt_endDt_tags_onSave_(
+            interval_id, start_dt, end_dt, tags,
+            _on_edit_save,
+        )
+        self._edit_ctrl = ctrl  # keep alive
         ctrl.show()
 
     @objc.typedSelector(b"v@:@")
@@ -1314,7 +1367,7 @@ def _wrap_tl_scroll(tl_view, tl_h, max_h=TL_MAX_H):
 
 
 def build_report_view(period, offset, on_navigate, workday_hours=7.5,
-                      show_empty_days=True, filter_tags=None):
+                      show_empty_days=True, filter_tags=None, on_refresh=None):
     """Build and return (NSView, height) for the given period and offset.
 
     period          : "day" | "week" | "month"
@@ -1476,6 +1529,8 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
         rows, tag_index, hour_start, hour_end, tl_row_h,
         start_date, end_date, filter_tags,
     )
+    if on_refresh is not None:
+        tl_view._on_refresh = on_refresh
     tl_h = tl_view._height
     tl_scroll, tl_visible_h = _wrap_tl_scroll(tl_view, tl_h)
 
@@ -1558,7 +1613,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
 
 def build_custom_report_view(start_date, end_date, on_show,
                              workday_hours=7.5, show_empty_days=True,
-                             filter_tags=None):
+                             filter_tags=None, on_refresh=None):
     """Build report view for an explicit start_date..end_date range.
 
     on_show : callable() — called when the user clicks Show (no-op after first build)
@@ -1669,6 +1724,8 @@ def build_custom_report_view(start_date, end_date, on_show,
         rows, tag_index, hour_start, hour_end, tl_row_h,
         start_date, end_date, filter_tags,
     )
+    if on_refresh is not None:
+        tl_view._on_refresh = on_refresh
     tl_h = tl_view._height
     tl_scroll, tl_visible_h = _wrap_tl_scroll(tl_view, tl_h)
 
@@ -1788,6 +1845,7 @@ class ReportWindowController(NSObject):
 
     @objc.python_method
     def _rebuild_tab(self, period):
+        on_refresh = lambda p=period: self._rebuild_tab(p)
         if period == "custom":
             content, content_h = build_custom_report_view(
                 self._custom_start, self._custom_end,
@@ -1795,6 +1853,7 @@ class ReportWindowController(NSObject):
                 workday_hours=self._workday_hours,
                 show_empty_days=self._show_empty_days,
                 filter_tags=self._filter_tags,
+                on_refresh=on_refresh,
             )
         else:
             offset = self._offsets[period]
@@ -1804,6 +1863,7 @@ class ReportWindowController(NSObject):
                 workday_hours=self._workday_hours,
                 show_empty_days=self._show_empty_days,
                 filter_tags=self._filter_tags,
+                on_refresh=on_refresh,
             )
         self._tab_heights[period] = content_h
 
@@ -1916,6 +1976,7 @@ class ReportWindowController(NSObject):
                     workday_hours=self._workday_hours,
                     show_empty_days=self._show_empty_days,
                     filter_tags=self._filter_tags,
+                    on_refresh=lambda p=period: self._rebuild_tab(p),
                 )
             else:
                 offset = self._offsets[period]
@@ -1925,6 +1986,7 @@ class ReportWindowController(NSObject):
                     workday_hours=self._workday_hours,
                     show_empty_days=self._show_empty_days,
                     filter_tags=self._filter_tags,
+                    on_refresh=lambda p=period: self._rebuild_tab(p),
                 )
             self._tab_heights[period] = content_h
             built.append((period, content))
@@ -1942,7 +2004,7 @@ class ReportWindowController(NSObject):
             False,
         )
         self.window.setReleasedWhenClosed_(False)
-        self.window.setTitle_("Arête — Reports")
+        self.window.setTitle_("Arête — Logbook")
         self.window.setContentMinSize_(NSSize(600, 300))
         self.window.center()
 
@@ -2251,12 +2313,12 @@ class ReportWindowController(NSObject):
 
 def main():
     # Inject CFBundleName into the main bundle's info dict so macOS shows
-    # "Arête Reports" as the Dock tooltip and app menu name instead of "Python".
+    # "Arête Logbook" as the Dock tooltip and app menu name instead of "Python".
     _info = NSBundle.mainBundle().infoDictionary()
     if _info is not None:
-        _info["CFBundleName"] = "Arête Reports"
-        _info["CFBundleDisplayName"] = "Arête Reports"
-    NSProcessInfo.processInfo().setProcessName_("Arête Reports")
+        _info["CFBundleName"] = "Arête Logbook"
+        _info["CFBundleDisplayName"] = "Arête Logbook"
+    NSProcessInfo.processInfo().setProcessName_("Arête Logbook")
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)

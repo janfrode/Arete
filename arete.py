@@ -29,7 +29,8 @@ from AppKit import (
     NSBox, NSGridView, NSGridCell, NSPanel, NSWindowStyleMaskBorderless,
     NSViewWidthSizable, NSViewHeightSizable,
     NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow,
-    NSVisualEffectStateActive, NSFontManager, NSView
+    NSVisualEffectStateActive, NSFontManager, NSView,
+    NSCursor,
 )
 from datetime import datetime, timezone, timedelta
 import objc
@@ -374,7 +375,7 @@ class PreferencesWindow(NSObject):
         stack.addView_inGravity_(self.chk_login, 1)
 
         self.chk_empty_days = NSButton.buttonWithTitle_target_action_(
-            "Show empty days in reports", self, None
+            "Show empty days in logbook", self, None
         )
         self.chk_empty_days.setButtonType_(3)
         self.chk_empty_days.setState_(
@@ -915,8 +916,8 @@ class HelpWindow(NSObject):
         ('Refresh tags',
          'Re-reads all tags from Timewarrior and rebuilds the menu. '
          'Useful after adding tags directly on the command line.'),
-        ('Show Reports\u2026',
-         'Opens the full report window with Day / Week / Month / Custom tabs. '
+        ('Logbook',
+         'Opens the Logbook with Day / Week / Month / Custom tabs. '
          'Each tab shows a timeline, pie chart, time summary table, and \u2014 when present \u2014 '
          'an annotations table.\n\n'
          '\u2022 Filter tags: use the "Filter tags\u2026" pull-down to narrow the view to specific tags. '
@@ -931,10 +932,10 @@ class HelpWindow(NSObject):
          '\u2022 Prompt for annotation when stopping \u2014 opens an annotation dialog every time a tag '
          'is stopped or switched.\n'
          '\u2022 Start at login \u2014 adds Ar\u00eate to macOS login items.\n'
-         '\u2022 Show empty days in reports \u2014 includes days with no tracked time in week/month views.\n'
+         '\u2022 Show empty days in logbook \u2014 includes days with no tracked time in week/month views.\n'
          '\u2022 Recent tags range \u2014 how far back "recent" tags extend (default: month).\n'
          '\u2022 Daily work target \u2014 used for the % of target column and pie chart remainder.'),
-        ('Annotations in reports',
+        ('Annotations in logbook',
          'Any interval with an annotation shows its text inside the timeline bar (when the bar '
          'is wide enough) and in a tooltip on hover. '
          'A separate "Annotations" table below the pie chart lists every annotated interval '
@@ -1128,6 +1129,403 @@ class AnnotateWindow(NSObject):
 
 
 
+# ---------------------------------------------------------------------------
+# Draggable time-scrubber view used by EditIntervalWindow
+# ---------------------------------------------------------------------------
+
+class TimeScrubberView(NSView):
+    """A horizontal bar spanning the day with draggable start/end handles.
+
+    The track represents the hours visible_start_h … visible_end_h (default
+    0–24).  Two circular handles mark the start and end of the interval.
+    Dragging a handle snaps to the nearest minute and updates a live time
+    label.  The view calls self._on_change(start_dt, end_dt) whenever a
+    handle is released.
+    """
+
+    TRACK_H    = 8.0    # height of the grey track bar
+    HANDLE_R   = 9.0    # radius of the drag handle circle
+    VIEW_H     = 56.0   # total view height
+    PAD_X      = 16.0   # horizontal padding inside the view
+
+    def initWithStartDt_endDt_isActive_onChange_(
+            self, start_dt, end_dt, is_active, on_change):
+        frame = NSRect(NSPoint(0, 0), NSSize(440.0, self.VIEW_H))
+        self = objc.super(TimeScrubberView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._start_dt  = start_dt
+        self._end_dt    = end_dt      # None when interval is still active
+        self._is_active = is_active
+        self._on_change = on_change   # callable(start_dt, end_dt_or_None)
+        self._dragging  = None        # "start" | "end" | None
+        self.setAutoresizingMask_(NSViewWidthSizable)
+        return self
+
+    # ── geometry helpers ────────────────────────────────────────────────────
+
+    def _track_rect(self):
+        w  = self.bounds().size.width
+        cx = self.VIEW_H / 2.0
+        return (self.PAD_X, cx - self.TRACK_H / 2.0,
+                w - 2 * self.PAD_X, self.TRACK_H)
+
+    def _frac_for_dt(self, dt):
+        """Fraction [0, 1] of dt within the day of _start_dt."""
+        day_start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return max(0.0, min(1.0,
+            (dt - day_start).total_seconds() / 86400.0))
+
+    def _x_for_dt(self, dt):
+        tx, _ty, tw, _th = self._track_rect()
+        return tx + self._frac_for_dt(dt) * tw
+
+    def _dt_for_x(self, x):
+        """Snap x position to nearest minute within the same day."""
+        tx, _ty, tw, _th = self._track_rect()
+        frac = max(0.0, min(1.0, (x - tx) / tw))
+        day_start = self._start_dt.replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        total_mins = round(frac * 1440)   # snap to minute
+        return day_start + timedelta(minutes=total_mins)
+
+    # ── drawing ─────────────────────────────────────────────────────────────
+
+    def drawRect_(self, dirty_rect):
+        import math
+        NSColor.windowBackgroundColor().set()
+        NSBezierPath.fillRect_(self.bounds())
+        NSGraphicsContext.currentContext().setShouldAntialias_(True)
+
+        tx, ty, tw, th = self._track_rect()
+        cx = ty + th / 2.0          # vertical centre of the track
+
+        # ── background track ────────────────────────────────────────────────
+        track_rect = NSRect(NSPoint(tx, ty), NSSize(tw, th))
+        r = th / 2.0
+        bg_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            track_rect, r, r)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            0.75, 0.75, 0.75, 0.4).set()
+        bg_path.fill()
+
+        # ── filled interval bar ─────────────────────────────────────────────
+        x0 = self._x_for_dt(self._start_dt)
+        x1 = self._x_for_dt(self._end_dt) if self._end_dt else (tx + tw)
+        bar_rect = NSRect(NSPoint(x0, ty), NSSize(max(2.0, x1 - x0), th))
+        bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            bar_rect, r, r)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            0.23, 0.51, 0.82, 0.85).set()
+        bar_path.fill()
+
+        # ── hour tick marks ─────────────────────────────────────────────────
+        small_attrs = {
+            NSFontAttributeName: NSFont.systemFontOfSize_(8.0),
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+        }
+        tick_y_top = ty + th + 3.0
+        for h in range(0, 25, 3):
+            frac = h / 24.0
+            x    = tx + frac * tw
+            tick = NSBezierPath.bezierPath()
+            tick.setLineWidth_(0.5)
+            tick.moveToPoint_(NSPoint(x, tick_y_top))
+            tick.lineToPoint_(NSPoint(x, tick_y_top + 4.0))
+            NSColor.secondaryLabelColor().set()
+            tick.stroke()
+            lbl = NSString.stringWithString_(f"{h:02d}")
+            lbl_sz = lbl.sizeWithAttributes_(small_attrs)
+            lbl.drawAtPoint_withAttributes_(
+                NSPoint(x - lbl_sz.width / 2.0, tick_y_top + 5.0),
+                small_attrs)
+
+        # ── handles ─────────────────────────────────────────────────────────
+        def draw_handle(x, label, is_end=False):
+            hc = NSPoint(x, cx)
+            hr = self.HANDLE_R
+            circle = NSBezierPath.bezierPathWithOvalInRect_(
+                NSRect(NSPoint(hc.x - hr, hc.y - hr), NSSize(hr * 2, hr * 2))
+            )
+            NSColor.whiteColor().set()
+            circle.fill()
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.23, 0.51, 0.82, 1.0).set()
+            circle.setLineWidth_(2.0)
+            circle.stroke()
+            # time label above the handle
+            lbl_attrs = {
+                NSFontAttributeName: NSFont.boldSystemFontOfSize_(9.5),
+                NSForegroundColorAttributeName: NSColor.labelColor(),
+            }
+            ns_lbl = NSString.stringWithString_(label)
+            sz = ns_lbl.sizeWithAttributes_(lbl_attrs)
+            ns_lbl.drawAtPoint_withAttributes_(
+                NSPoint(hc.x - sz.width / 2.0, hc.y + hr + 1.0),
+                lbl_attrs)
+
+        draw_handle(x0, self._start_dt.strftime("%-H:%M"))
+        if self._end_dt:
+            draw_handle(x1, self._end_dt.strftime("%-H:%M"), is_end=True)
+
+    # ── mouse interaction ────────────────────────────────────────────────────
+
+    def _hit_handle(self, pt):
+        """Return "start", "end", or None depending on which handle is hit."""
+        x0 = self._x_for_dt(self._start_dt)
+        x1 = self._x_for_dt(self._end_dt) if self._end_dt else None
+        _, ty, _, th = self._track_rect()
+        cy = ty + th / 2.0
+        r  = self.HANDLE_R + 4.0   # generous hit area
+        import math
+        if math.hypot(pt.x - x0, pt.y - cy) <= r:
+            return "start"
+        if x1 is not None and math.hypot(pt.x - x1, pt.y - cy) <= r:
+            return "end"
+        return None
+
+    def mouseDown_(self, event):
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        self._dragging = self._hit_handle(pt)
+        if self._dragging:
+            NSCursor.closedHandCursor().push()
+
+    def mouseDragged_(self, event):
+        if not self._dragging:
+            return
+        pt  = self.convertPoint_fromView_(event.locationInWindow(), None)
+        new_dt = self._dt_for_x(pt.x)
+        if self._dragging == "start":
+            # Don't let start cross end
+            if self._end_dt and new_dt >= self._end_dt:
+                new_dt = self._end_dt - timedelta(minutes=1)
+            self._start_dt = new_dt
+        else:
+            # Don't let end cross start
+            if new_dt <= self._start_dt:
+                new_dt = self._start_dt + timedelta(minutes=1)
+            self._end_dt = new_dt
+        self.setNeedsDisplay_(True)
+
+    def mouseUp_(self, event):
+        if self._dragging:
+            NSCursor.pop()
+            self._dragging = None
+            if self._on_change:
+                self._on_change(self._start_dt, self._end_dt)
+
+    def resetCursorRects(self):
+        # Show an open-hand cursor over the handles
+        x0 = self._x_for_dt(self._start_dt)
+        x1 = self._x_for_dt(self._end_dt) if self._end_dt else None
+        _, ty, _, th = self._track_rect()
+        cy = ty + th / 2.0
+        r  = self.HANDLE_R + 4.0
+        for x in filter(None, [x0, x1]):
+            self.addCursorRect_cursor_(
+                NSRect(NSPoint(x - r, cy - r), NSSize(r * 2, r * 2)),
+                NSCursor.openHandCursor(),
+            )
+
+    def acceptsFirstResponder(self):
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Edit Interval dialog
+# ---------------------------------------------------------------------------
+
+class EditIntervalWindow(NSObject):
+    """Dialog for editing the start/end times and tags of a timew interval.
+
+    interval_id : int   — timew @id
+    start_dt    : datetime (local) — pre-filled start
+    end_dt      : datetime (local) — pre-filled end (None if active/open)
+    tags        : list[str]        — current tags
+    on_save     : callable()       — called after a successful save
+    """
+
+    _TIME_FMT = "%Y-%m-%d %H:%M"
+
+    def initWithIntervalId_startDt_endDt_tags_onSave_(
+            self, interval_id, start_dt, end_dt, tags, on_save):
+        self = objc.super(EditIntervalWindow, self).init()
+        if self is None:
+            return None
+        self._interval_id = interval_id
+        self._start_dt    = start_dt
+        self._end_dt      = end_dt
+        self._orig_tags   = list(tags)
+        self._on_save     = on_save
+        return self
+
+    def show(self):
+        style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(480, 280)),
+            style_mask, NSBackingStoreBuffered, False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_(f"Edit Interval @{self._interval_id}")
+        window.center()
+
+        stack = NSStackView.stackViewWithViews_([])
+        stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        stack.setSpacing_(10.0)
+        stack.setEdgeInsets_((16.0, 20.0, 16.0, 20.0))
+
+        # ── time scrubber ────────────────────────────────────────────────────
+        def _on_scrub_change(s_dt, e_dt):
+            # Keep our copies in sync so save_() can read them directly
+            self._start_dt = s_dt
+            self._end_dt   = e_dt
+            # Update the text labels
+            self.lbl_start_val.setStringValue_(s_dt.strftime(self._TIME_FMT))
+            if e_dt:
+                self.lbl_end_val.setStringValue_(e_dt.strftime(self._TIME_FMT))
+
+        is_active = self._end_dt is None
+        self.scrubber = TimeScrubberView.alloc(
+        ).initWithStartDt_endDt_isActive_onChange_(
+            self._start_dt,
+            self._end_dt,
+            is_active,
+            _on_scrub_change,
+        )
+        self.scrubber.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        self.scrubber.heightAnchor().constraintEqualToConstant_(
+            TimeScrubberView.VIEW_H).setActive_(True)
+        stack.addView_inGravity_(self.scrubber, 1)
+
+        # ── read-only time labels (updated by scrubber) ──────────────────────
+        LABEL_W = 46
+
+        def _time_row(prefix, dt_or_none):
+            row = NSStackView.stackViewWithViews_([])
+            row.setOrientation_(0)
+            row.setAlignment_(8)
+            row.setSpacing_(6.0)
+            key_lbl = NSTextField.labelWithString_(prefix)
+            key_lbl.setFont_(NSFont.systemFontOfSize_(11))
+            key_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            key_lbl.setAlignment_(1)
+            key_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            key_lbl.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
+            val_lbl = NSTextField.labelWithString_(
+                dt_or_none.strftime(self._TIME_FMT) if dt_or_none else "—  (still active)"
+            )
+            val_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(11, 0))
+            val_lbl.setSelectable_(True)
+            row.addView_inGravity_(key_lbl, 1)
+            row.addView_inGravity_(val_lbl, 1)
+            return row, val_lbl
+
+        start_row, self.lbl_start_val = _time_row("Start:", self._start_dt)
+        end_row,   self.lbl_end_val   = _time_row("End:",   self._end_dt)
+        stack.addView_inGravity_(start_row, 1)
+        stack.addView_inGravity_(end_row, 1)
+
+        # ── thin separator ───────────────────────────────────────────────────
+        sep = NSBox.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(10, 1)))
+        sep.setBoxType_(2)
+        stack.addView_inGravity_(sep, 1)
+
+        # ── tags field ───────────────────────────────────────────────────────
+        FIELD_W = 380
+        tags_row = NSStackView.stackViewWithViews_([])
+        tags_row.setOrientation_(0)
+        tags_row.setAlignment_(8)
+        tags_row.setSpacing_(8.0)
+        tags_lbl = NSTextField.labelWithString_("Tags:")
+        tags_lbl.setFont_(NSFont.systemFontOfSize_(12))
+        tags_lbl.setAlignment_(1)
+        tags_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        tags_lbl.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
+        self.txt_tags = NSTextField.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(FIELD_W - LABEL_W - 8, 22))
+        )
+        self.txt_tags.setStringValue_(
+            " ".join(shlex.quote(t) if " " in t else t for t in self._orig_tags)
+        )
+        self.txt_tags.setPlaceholderString_("space-separated tags")
+        tags_row.addView_inGravity_(tags_lbl, 1)
+        tags_row.addView_inGravity_(self.txt_tags, 1)
+        stack.addView_inGravity_(tags_row, 1)
+
+        # ── :adjust checkbox ────────────────────────────────────────────────
+        self.chk_adjust = NSButton.buttonWithTitle_target_action_(
+            "Automatically fix overlaps (:adjust)", self, None
+        )
+        self.chk_adjust.setButtonType_(3)
+        self.chk_adjust.setState_(NSControlStateValueOff)
+        self.chk_adjust.setFont_(NSFont.systemFontOfSize_(11))
+        stack.addView_inGravity_(self.chk_adjust, 1)
+
+        # ── error label ──────────────────────────────────────────────────────
+        self.lbl_error = NSTextField.labelWithString_("")
+        self.lbl_error.setTextColor_(NSColor.systemRedColor())
+        self.lbl_error.setFont_(NSFont.systemFontOfSize_(11))
+        stack.addView_inGravity_(self.lbl_error, 1)
+
+        # ── buttons ──────────────────────────────────────────────────────────
+        btn_stack = NSStackView.stackViewWithViews_([])
+        btn_stack.setSpacing_(8.0)
+        btn_cancel = NSButton.buttonWithTitle_target_action_("Cancel", self, "cancel:")
+        btn_cancel.setKeyEquivalent_("\x1b")
+        btn_save = NSButton.buttonWithTitle_target_action_("Save", self, "save:")
+        btn_save.setKeyEquivalent_("\r")
+        btn_stack.addView_inGravity_(btn_cancel, 3)
+        btn_stack.addView_inGravity_(btn_save, 3)
+        stack.addView_inGravity_(btn_stack, 3)
+
+        window.setContentView_(stack)
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+    @objc.typedSelector(b"v@:@")
+    def cancel_(self, sender):
+        self.window.close()
+
+    @objc.typedSelector(b"v@:@")
+    def save_(self, sender):
+        tags_str = self.txt_tags.stringValue().strip()
+
+        def _dt_to_timew(dt):
+            return dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
+
+        iid    = f"@{self._interval_id}"
+        adjust = self.chk_adjust.state() == NSControlStateValueOn
+        hints  = [":adjust"] if adjust else []
+
+        try:
+            run_checked("modify", "start", iid, _dt_to_timew(self._start_dt), *hints)
+
+            if self._end_dt is not None:
+                run_checked("modify", "end", iid, _dt_to_timew(self._end_dt), *hints)
+
+            # Update tags
+            try:
+                new_tags = set(t for t in shlex.split(tags_str) if t)
+            except ValueError:
+                new_tags = set(t for t in tags_str.split() if t)
+            orig_tags = set(self._orig_tags)
+            to_remove = orig_tags - new_tags
+            to_add    = new_tags - orig_tags
+            if to_remove:
+                run_checked("untag", iid, *sorted(to_remove))
+            if to_add:
+                run_checked("tag", iid, *sorted(to_add))
+
+        except RuntimeError as e:
+            self.lbl_error.setStringValue_(str(e))
+            return
+
+        self.window.close()
+        if self._on_save:
+            self._on_save()
+
+
 def find_timew_path():
     """Find the path to the timew executable.
 
@@ -1204,6 +1602,22 @@ def run(*args):
         return ""
     except Exception:
         return ""
+
+
+def run_checked(*args):
+    """Like run() but raises RuntimeError on non-zero exit, with stderr as message."""
+    result = subprocess.run(
+        [TIMEW] + list(args),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+    )
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout).strip()
+        raise RuntimeError(msg or f"timew {args[0]} failed (exit {result.returncode})")
+    return result.stdout.strip()
 
 
 def parse_tags_output(out):
@@ -1829,7 +2243,7 @@ class TimeBar(rumps.App):
         self._annotate_active_item = annotate_item
         self.menu.add(annotate_item)
         self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
-        self.menu.add(rumps.MenuItem("Show Reports...", callback=self._show_reports))
+        self.menu.add(rumps.MenuItem("Logbook", callback=self._show_reports))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Preferences...", callback=self._preferences))
         self.menu.add(rumps.MenuItem("What's New…", callback=self._show_whats_new))

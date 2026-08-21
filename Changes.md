@@ -1,5 +1,8 @@
 # What's New in Arête
 
+## 1.0.10
+- Edit tasks in logbook
+
 ## 1.0.9
 - Check for updates
 - Limit menu bar realestate
