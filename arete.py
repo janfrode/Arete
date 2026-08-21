@@ -2231,36 +2231,36 @@ class TimeBar(rumps.App):
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
 
-        # "Add tag…" submenu — two levels (recent / older), only shown when tracking
-        recent_tags_set = set(recent_tags)
-        add_recent = [t for t in recent_tags if t not in active_tags]
-        add_older  = [t for t in all_tags if t not in active_tags and t not in recent_tags_set]
+        # "Add additional tag" and "Annotate active task" — only shown when tracking
+        if active_tags:
+            recent_tags_set = set(recent_tags)
+            add_recent = [t for t in recent_tags if t not in active_tags]
+            add_older  = [t for t in all_tags if t not in active_tags and t not in recent_tags_set]
 
-        if add_recent or add_older:
-            add_menu = rumps.MenuItem("Add additional tag")
-            self._add_tag_menu = add_menu
+            if add_recent or add_older:
+                add_menu = rumps.MenuItem("Add additional tag")
+                self._add_tag_menu = add_menu
 
-            for tag in add_recent:
-                item = rumps.MenuItem(tag, callback=self._add_tag_clicked)
-                item.tag_name = tag
-                add_menu.add(item)
-
-            if add_older:
-                if add_recent:
-                    add_menu.add(rumps.separator)
-                older_sub = rumps.MenuItem("Older tags")
-                for tag in add_older:
+                for tag in add_recent:
                     item = rumps.MenuItem(tag, callback=self._add_tag_clicked)
                     item.tag_name = tag
-                    older_sub.add(item)
-                add_menu.add(older_sub)
+                    add_menu.add(item)
 
-            self.menu.add(add_menu)
+                if add_older:
+                    if add_recent:
+                        add_menu.add(rumps.separator)
+                    older_sub = rumps.MenuItem("Older tags")
+                    for tag in add_older:
+                        item = rumps.MenuItem(tag, callback=self._add_tag_clicked)
+                        item.tag_name = tag
+                        older_sub.add(item)
+                    add_menu.add(older_sub)
 
-        self.menu.add(rumps.MenuItem("Stop all tracking", callback=self._stop_all))
-        annotate_item = rumps.MenuItem("Annotate active task", callback=self._annotate_active)
-        self._annotate_active_item = annotate_item
-        self.menu.add(annotate_item)
+                self.menu.add(add_menu)
+
+            self.menu.add(rumps.MenuItem("Annotate active task", callback=self._annotate_active))
+            self.menu.add(rumps.MenuItem("Stop all tracking", callback=self._stop_all))
+
         self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
         self.menu.add(rumps.MenuItem("Logbook", callback=self._show_reports))
         self.menu.add(rumps.separator)
@@ -2507,11 +2507,6 @@ class TimeBar(rumps.App):
                         image_view.setImage_(img)
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
-
-        # Enable/disable "Annotate active…"
-        annotate_item = getattr(self, "_annotate_active_item", None)
-        if annotate_item:
-            annotate_item._menuitem.setEnabled_(bool(active))
 
         for tag, item in self._tag_items.items():
             item.state = tag in active
