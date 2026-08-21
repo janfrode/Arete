@@ -909,7 +909,7 @@ class HelpWindow(NSObject):
         ('Stop all',
          'Stops all active tracking immediately. '
          'If "Prompt for annotation when stopping" is enabled, an annotation dialog appears.'),
-        ('Annotate active\u2026',
+        ('Annotate active task',
          'Only enabled while tracking. '
          'Opens a dialog to attach a short note to the currently running interval. '
          'The note is stored inside Timewarrior and shown in reports and tooltips.'),
@@ -2258,7 +2258,7 @@ class TimeBar(rumps.App):
             self.menu.add(add_menu)
 
         self.menu.add(rumps.MenuItem("Stop all", callback=self._stop_all))
-        annotate_item = rumps.MenuItem("Annotate active…", callback=self._annotate_active)
+        annotate_item = rumps.MenuItem("Annotate active task", callback=self._annotate_active)
         self._annotate_active_item = annotate_item
         self.menu.add(annotate_item)
         self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
