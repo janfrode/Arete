@@ -2373,7 +2373,6 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
         pie_cy = PAGE_H / 2.0 - 10.0
 
         _draw_pie(pie_cx, pie_cy, PIE_R)
-        _draw_legend_below_pie(pie_cx, pie_cy - PIE_R - 14.0)
 
         table_x = pie_cx + PIE_R + 30.0
         table_y = PAGE_H - MARGIN - 36.0
