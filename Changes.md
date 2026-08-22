@@ -1,5 +1,8 @@
 # What's New in Arête
 
+## 1.0.11
+- Add PDF exports
+
 ## 1.0.10
 - Edit tasks in logbook
 

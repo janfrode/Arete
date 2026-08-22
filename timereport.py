@@ -2478,16 +2478,19 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
 
     # ── PAGE 2: timeline ─────────────────────────────────────────────────────
 
-    _PDF_ROW_H    = 14.0
     _PDF_LABEL_W  = 52.0
     _PDF_PAD_TOP  = 18.0
     _PDF_PAD_BOT  = 6.0
+    _PDF_ROW_GAP  = 2.0
+    # Available vertical space for all rows (header_h reserved at top)
+    _TL_AVAIL     = PAGE_H - MARGIN - 36.0 - _PDF_PAD_TOP - _PDF_PAD_BOT
 
     def _tl_layout():
-        row_heights = []
+        # Count lanes per row (capped at 2 so one busy day can't dominate)
+        lane_counts = []
         for _lbl, _day, invs in rows:
             if not invs:
-                row_heights.append(_PDF_ROW_H)
+                lane_counts.append(1)
                 continue
             sorted_i = sorted(invs, key=lambda i: i["start"])
             lanes = []
@@ -2499,12 +2502,17 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
                     lanes.append(inv["end"])
                 else:
                     lanes[li] = inv["end"]
-            row_heights.append(max(_PDF_ROW_H, len(lanes) * _PDF_ROW_H))
-        total = sum(row_heights) + 4.0 * len(rows)
-        return row_heights, _PDF_PAD_TOP + total + _PDF_PAD_BOT
+            lane_counts.append(min(len(lanes), 2))   # cap at 2 lanes
+
+        total_units = sum(lane_counts) + _PDF_ROW_GAP * len(rows)
+        # Row height that makes everything fit; floor at 4 pt, ceil at 14 pt
+        rh = max(4.0, min(14.0, _TL_AVAIL / total_units if total_units else 14.0))
+        row_heights = [c * rh for c in lane_counts]
+        total = sum(row_heights) + _PDF_ROW_GAP * len(rows)
+        return row_heights, _PDF_PAD_TOP + total + _PDF_PAD_BOT, rh
 
     def _draw_timeline(y_offset):
-        row_heights, tl_h = _tl_layout()
+        row_heights, tl_h, rh = _tl_layout()
         graph_x0    = MARGIN + _PDF_LABEL_W
         graph_w     = PAGE_W - MARGIN - _PDF_LABEL_W - MARGIN
         total_hours = hour_end - hour_start
@@ -2581,7 +2589,7 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
                     _ns_color(r, g, b, 0.90).set()
                     _stroke_rect(x0, ly, x1 - x0, bh, lw=0.5)
 
-            y_cur = y_base - 4.0
+            y_cur = y_base - _PDF_ROW_GAP
 
         return tl_h
 
@@ -2646,7 +2654,7 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
 
     # Page 2 — timeline (+ annotations if they fit)
     ann_list    = _annotated()
-    _, tl_h     = _tl_layout()
+    _, tl_h, _  = _tl_layout()
     header_h    = 36.0
     tl_top      = PAGE_H - MARGIN - header_h
     tl_bottom   = tl_top - tl_h
