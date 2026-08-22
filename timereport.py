@@ -2285,6 +2285,398 @@ def build_custom_report_view(start_date, end_date, on_show,
 
 
 # ---------------------------------------------------------------------------
+# PDF export
+# ---------------------------------------------------------------------------
+
+def export_logbook_pdf(start_date, end_date, period_title, intervals,
+                       all_tags, tag_index, tag_totals, grand_total,
+                       target_secs, rows, hour_start, hour_end, path):
+    """Write a multi-page PDF to *path*.
+
+    Page 1 – pie chart (large, centred) + summary table
+    Page 2 – timeline + annotations if they fit; otherwise just timeline
+    Page 3 – annotations (only when they don't fit on page 2)
+
+    Uses only AppKit/Foundation (NSGraphicsContext PDF mode) so it works in
+    the py2app bundle without the separate pyobjc-framework-Quartz package.
+    """
+    import math
+    from Foundation import NSMutableData
+
+    PAGE_W = 792.0   # US Letter landscape pts
+    PAGE_H = 612.0
+    MARGIN = 36.0
+
+    # ── drawing helpers (AppKit only) ────────────────────────────────────────
+
+    def _ns_color(r, g, b, a=1.0):
+        return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
+
+    def _fill_rect(x, y, w, h):
+        NSBezierPath.fillRect_(NSRect(NSPoint(x, y), NSSize(w, h)))
+
+    def _stroke_line(x0, y0, x1, y1, lw=0.5):
+        p = NSBezierPath.bezierPath()
+        p.setLineWidth_(lw)
+        p.moveToPoint_(NSPoint(x0, y0))
+        p.lineToPoint_(NSPoint(x1, y1))
+        p.stroke()
+
+    def _stroke_rect(x, y, w, h, lw=0.75):
+        p = NSBezierPath.bezierPathWithRect_(NSRect(NSPoint(x, y), NSSize(w, h)))
+        p.setLineWidth_(lw)
+        p.stroke()
+
+    def _draw_text(text, x, y, size=10.0, bold=False, r=0.0, g=0.0, b=0.0, a=1.0):
+        font = (NSFont.boldSystemFontOfSize_(size) if bold
+                else NSFont.systemFontOfSize_(size))
+        attrs = {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: _ns_color(r, g, b, a),
+        }
+        NSString.stringWithString_(text).drawAtPoint_withAttributes_(
+            NSPoint(x, y), attrs)
+
+    def _text_width(text, size=10.0, bold=False):
+        font = (NSFont.boldSystemFontOfSize_(size) if bold
+                else NSFont.systemFontOfSize_(size))
+        attrs = {NSFontAttributeName: font}
+        return NSString.stringWithString_(text).sizeWithAttributes_(attrs).width
+
+    def _tag_rgb(cidx):
+        return _rgb(cidx)   # returns (r, g, b)
+
+    # ── page header ──────────────────────────────────────────────────────────
+
+    def _draw_page_header(title, subtitle=""):
+        _ns_color(0.15, 0.15, 0.15).set()
+        _draw_text(title, MARGIN, PAGE_H - MARGIN - 2, size=14.0, bold=True,
+                   r=0.15, g=0.15, b=0.15)
+        if subtitle:
+            _draw_text(subtitle, MARGIN, PAGE_H - MARGIN - 16, size=9.0,
+                       r=0.45, g=0.45, b=0.45)
+
+    # ── PAGE 1: pie + summary table ──────────────────────────────────────────
+
+    def _build_subtitle():
+        if target_secs:
+            pct = grand_total / target_secs * 100
+            return (f"{seconds_to_hm(grand_total)} tracked  /  "
+                    f"target {seconds_to_hm(target_secs)}  ({pct:.0f}%)")
+        return f"{seconds_to_hm(grand_total)} tracked"
+
+    def _draw_page1():
+        _draw_page_header(f"Logbook — {period_title}", subtitle=_build_subtitle())
+
+        PIE_R = 150.0
+        pie_cx = MARGIN + PIE_R + 10.0
+        pie_cy = PAGE_H / 2.0 - 10.0
+
+        _draw_pie(pie_cx, pie_cy, PIE_R)
+        _draw_legend_below_pie(pie_cx, pie_cy - PIE_R - 14.0)
+
+        table_x = pie_cx + PIE_R + 30.0
+        table_y = PAGE_H - MARGIN - 36.0
+        _draw_summary_table(table_x, table_y)
+
+    def _draw_pie(cx, cy, radius):
+        tracked = sum(tag_totals.get(t, 0) for t in all_tags)
+        denom = max(tracked, target_secs) or 1.0
+        remainder = max(0.0, target_secs - tracked)
+
+        angle = 90.0   # 12 o'clock in AppKit degrees (CCW from east)
+
+        for tag in all_tags:
+            secs = tag_totals.get(tag, 0)
+            if secs == 0:
+                continue
+            sweep = (secs / denom) * 360.0
+            r, g, b = _tag_rgb(tag_index.get(tag, 0))
+            _nsbez_pie_slice(cx, cy, radius, angle, sweep, r, g, b, 0.80)
+            angle -= sweep
+
+        if remainder > 0:
+            sweep = (remainder / denom) * 360.0
+            _nsbez_pie_slice(cx, cy, radius, angle, sweep, 0.75, 0.75, 0.75, 0.35)
+
+    def _nsbez_pie_slice(cx, cy, radius, start_deg, sweep_deg, r, g, b, alpha):
+        path = NSBezierPath.bezierPath()
+        path.moveToPoint_(NSPoint(cx, cy))
+        path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            NSPoint(cx, cy), radius, start_deg, start_deg - sweep_deg, True)
+        path.closePath()
+        _ns_color(r, g, b, alpha).set()
+        path.fill()
+        _ns_color(r, g, b, min(1.0, alpha + 0.15)).set()
+        path.setLineWidth_(0.75)
+        path.stroke()
+
+    def _draw_legend_below_pie(cx, bottom_y):
+        SWATCH = 10.0
+        GAP    = 5.0
+        SIZE   = 9.0
+        items = []
+        for tag in all_tags:
+            if tag_totals.get(tag, 0) == 0:
+                continue
+            items.append((tag, _text_width(tag, size=SIZE) + SWATCH + GAP + 10.0))
+
+        rows_list, row_w = [[]], 0.0
+        for tag, w in items:
+            if row_w + w > 340.0 and rows_list[-1]:
+                rows_list.append([])
+                row_w = 0.0
+            rows_list[-1].append((tag, w))
+            row_w += w
+
+        y = bottom_y
+        for row in reversed(rows_list):
+            x = cx - sum(w for _, w in row) / 2.0
+            for tag, w in row:
+                r, g, b = _tag_rgb(tag_index.get(tag, 0))
+                _ns_color(r, g, b, 0.85).set()
+                _fill_rect(x, y, SWATCH, SWATCH)
+                _draw_text(tag, x + SWATCH + GAP, y, size=SIZE,
+                           r=0.15, g=0.15, b=0.15)
+                x += w
+            y -= 14.0
+
+    def _draw_summary_table(x, y):
+        ROW_H = 16.0
+        sorted_tags = [t for t in sorted(all_tags, key=lambda t: -tag_totals.get(t, 0))
+                       if tag_totals.get(t, 0) > 0]
+
+        _draw_text("Tag",      x + 12,  y, size=9.0, bold=True, r=0.2, g=0.2, b=0.2)
+        _draw_text("Time",     x + 165, y, size=9.0, bold=True, r=0.2, g=0.2, b=0.2)
+        _draw_text("% period", x + 225, y, size=9.0, bold=True, r=0.2, g=0.2, b=0.2)
+        if target_secs:
+            _draw_text("% target", x + 290, y, size=9.0, bold=True, r=0.2, g=0.2, b=0.2)
+        y -= ROW_H * 0.6
+        _ns_color(0.7, 0.7, 0.7).set()
+        _stroke_line(x, y, x + 360, y)
+        y -= ROW_H * 0.5
+
+        for tag in sorted_tags:
+            secs  = tag_totals.get(tag, 0)
+            pct_p = (secs / grand_total * 100) if grand_total else 0
+            r, g, b = _tag_rgb(tag_index.get(tag, 0))
+            _ns_color(r, g, b, 1.0).set()
+            _fill_rect(x, y + 1, 8, 8)
+            _draw_text(tag,                 x + 12,  y, size=9.0, r=0.15, g=0.15, b=0.15)
+            _draw_text(seconds_to_hm(secs), x + 165, y, size=9.0, r=0.15, g=0.15, b=0.15)
+            _draw_text(f"{pct_p:.1f}%",     x + 225, y, size=9.0, r=0.45, g=0.45, b=0.45)
+            if target_secs:
+                _draw_text(f"{secs / target_secs * 100:.1f}%",
+                           x + 290, y, size=9.0, r=0.45, g=0.45, b=0.45)
+            y -= ROW_H
+
+        y -= 4.0
+        _ns_color(0.7, 0.7, 0.7).set()
+        _stroke_line(x, y + ROW_H * 0.8, x + 360, y + ROW_H * 0.8)
+        _draw_text("Total",                    x + 12,  y, size=9.0, bold=True, r=0.15, g=0.15, b=0.15)
+        _draw_text(seconds_to_hm(grand_total), x + 165, y, size=9.0, bold=True, r=0.15, g=0.15, b=0.15)
+        _draw_text("100%",                     x + 225, y, size=9.0, bold=True, r=0.45, g=0.45, b=0.45)
+
+    # ── PAGE 2: timeline ─────────────────────────────────────────────────────
+
+    _PDF_ROW_H    = 14.0
+    _PDF_LABEL_W  = 52.0
+    _PDF_PAD_TOP  = 18.0
+    _PDF_PAD_BOT  = 6.0
+
+    def _tl_layout():
+        row_heights = []
+        for _lbl, _day, invs in rows:
+            if not invs:
+                row_heights.append(_PDF_ROW_H)
+                continue
+            sorted_i = sorted(invs, key=lambda i: i["start"])
+            lanes = []
+            for inv in sorted_i:
+                li = 0
+                while li < len(lanes) and lanes[li] > inv["start"]:
+                    li += 1
+                if li == len(lanes):
+                    lanes.append(inv["end"])
+                else:
+                    lanes[li] = inv["end"]
+            row_heights.append(max(_PDF_ROW_H, len(lanes) * _PDF_ROW_H))
+        total = sum(row_heights) + 4.0 * len(rows)
+        return row_heights, _PDF_PAD_TOP + total + _PDF_PAD_BOT
+
+    def _draw_timeline(y_offset):
+        row_heights, tl_h = _tl_layout()
+        graph_x0    = MARGIN + _PDF_LABEL_W
+        graph_w     = PAGE_W - MARGIN - _PDF_LABEL_W - MARGIN
+        total_hours = hour_end - hour_start
+
+        def x_for_hour(h):
+            return graph_x0 + ((h - hour_start) / total_hours) * graph_w
+
+        def x_for_dt(dt, ts, te):
+            span = (te - ts).total_seconds()
+            if span <= 0:
+                return graph_x0
+            return graph_x0 + max(0.0, min(1.0,
+                (dt - ts).total_seconds() / span)) * graph_w
+
+        # Hour grid + labels
+        for h in range(hour_start, hour_end + 1):
+            xh = x_for_hour(h)
+            _ns_color(0.8, 0.8, 0.8).set()
+            _stroke_line(xh, y_offset - _PDF_PAD_TOP + 2,
+                         xh, y_offset - tl_h + _PDF_PAD_BOT, lw=0.4)
+            _draw_text(f"{h:02d}", xh - 6, y_offset - _PDF_PAD_TOP + 4,
+                       size=7.0, r=0.5, g=0.5, b=0.5)
+
+        tz    = local_tz()
+        today = date.today()
+        y_cur = y_offset - _PDF_PAD_TOP - 4
+
+        for row_idx, (label_str, day_date, invs) in enumerate(rows):
+            rh     = row_heights[row_idx]
+            y_base = y_cur - rh
+
+            if day_date == today:
+                _ns_color(0.23, 0.51, 0.82, 0.06).set()
+                _fill_rect(graph_x0, y_base, graph_w, rh)
+
+            lbl_r, lbl_g, lbl_b = ((0.23, 0.51, 0.82) if day_date == today
+                                    else (0.45, 0.45, 0.45))
+            _draw_text(label_str, MARGIN, y_base + rh / 2.0 - 4,
+                       size=7.0, r=lbl_r, g=lbl_g, b=lbl_b)
+
+            if invs:
+                ts = datetime(day_date.year, day_date.month, day_date.day,
+                              hour_start, 0, 0, tzinfo=tz)
+                te = (datetime(day_date.year, day_date.month, day_date.day,
+                               0, 0, 0, tzinfo=tz) + timedelta(hours=hour_end))
+                flat = []
+                for inv in invs:
+                    for tag in inv["tags"] or ["(untagged)"]:
+                        flat.append({"start": inv["start"], "end": inv["end"],
+                                     "tag": tag})
+                flat.sort(key=lambda i: i["start"])
+                lanes, lane_data = [], []
+                for fi in flat:
+                    li = 0
+                    while li < len(lanes) and lanes[li] > fi["start"]:
+                        li += 1
+                    if li == len(lanes):
+                        lanes.append(fi["end"])
+                    else:
+                        lanes[li] = fi["end"]
+                    lane_data.append((fi, li))
+
+                lane_h = rh / max(len(lanes), 1)
+                for fi, li in lane_data:
+                    x0 = x_for_dt(fi["start"], ts, te)
+                    x1 = x_for_dt(fi["end"],   ts, te)
+                    if x1 - x0 < 2.0:
+                        x1 = x0 + 2.0
+                    ly   = y_base + li * lane_h + 1.0
+                    bh   = lane_h - 1.5
+                    r, g, b = _tag_rgb(tag_index.get(fi["tag"], 0))
+                    _ns_color(r, g, b, 0.40).set()
+                    _fill_rect(x0, ly, x1 - x0, bh)
+                    _ns_color(r, g, b, 0.90).set()
+                    _stroke_rect(x0, ly, x1 - x0, bh, lw=0.5)
+
+            y_cur = y_base - 4.0
+
+        return tl_h
+
+    # ── annotations ──────────────────────────────────────────────────────────
+
+    ANN_ROW_H = 13.0
+
+    def _annotated():
+        return sorted([inv for inv in intervals if inv.get("annotation")],
+                      key=lambda i: i["start"])
+
+    def _ann_height(ann_list):
+        return (len(ann_list) + 1) * ANN_ROW_H + 16.0
+
+    def _draw_annotations(ann_list, x, y_top):
+        _draw_text("Annotations", x, y_top, size=10.0, bold=True,
+                   r=0.15, g=0.15, b=0.15)
+        y = y_top - 14.0
+        _draw_text("Ended",      x,       y, size=8.0, bold=True, r=0.3, g=0.3, b=0.3)
+        _draw_text("Tags",       x + 90,  y, size=8.0, bold=True, r=0.3, g=0.3, b=0.3)
+        _draw_text("Annotation", x + 220, y, size=8.0, bold=True, r=0.3, g=0.3, b=0.3)
+        y -= ANN_ROW_H * 0.5
+        _ns_color(0.75, 0.75, 0.75).set()
+        _stroke_line(x, y, PAGE_W - MARGIN, y, lw=0.4)
+        y -= ANN_ROW_H * 0.6
+
+        for inv in ann_list:
+            time_str = inv["end"].strftime("%-d %b  %-H:%M")
+            tags     = inv.get("tags") or ["(untagged)"]
+            first    = tags[0]
+            r, g, b  = _tag_rgb(tag_index.get(first, 0))
+            _draw_text(time_str,              x,       y, size=8.0, r=0.45, g=0.45, b=0.45)
+            _draw_text(f"● {', '.join(tags)}", x + 90,  y, size=8.0, r=r,    g=g,    b=b)
+            _draw_text(inv["annotation"],      x + 220, y, size=8.0, r=0.15, g=0.15, b=0.15)
+            y -= ANN_ROW_H
+
+    # ── assemble pages via NSGraphicsContext PDF mode ─────────────────────────
+
+    pdf_data = NSMutableData.data()
+    attrs = {
+        "NSGraphicsContextDestinationAttributeName": pdf_data,
+        "NSGraphicsContextRepresentationFormatAttributeName":
+            "NSGraphicsContextPDFFormat",
+    }
+    gc = NSGraphicsContext.graphicsContextWithAttributes_(attrs)
+    if gc is None:
+        raise RuntimeError("Could not create NSGraphicsContext for PDF output")
+
+    page_bounds = NSRect(NSPoint(0, 0), NSSize(PAGE_W, PAGE_H))
+
+    def _begin_page():
+        gc.beginPageWithBounds_(page_bounds)
+        NSGraphicsContext.setCurrentContext_(gc)
+        NSGraphicsContext.currentContext().setShouldAntialias_(True)
+
+    gc.beginDocumentWithTitle_("Logbook")
+
+    # Page 1 — pie + summary
+    _begin_page()
+    _draw_page1()
+    gc.endPage()
+
+    # Page 2 — timeline (+ annotations if they fit)
+    ann_list    = _annotated()
+    _, tl_h     = _tl_layout()
+    header_h    = 36.0
+    tl_top      = PAGE_H - MARGIN - header_h
+    tl_bottom   = tl_top - tl_h
+    ann_gap     = 18.0
+    ann_h       = _ann_height(ann_list) if ann_list else 0.0
+    fits_on_p2  = ann_list and (tl_bottom - ann_gap - ann_h) >= MARGIN
+
+    _begin_page()
+    _draw_page_header(f"Logbook — {period_title}", subtitle="Timeline")
+    _draw_timeline(tl_top)
+    if fits_on_p2:
+        _draw_annotations(ann_list, MARGIN, tl_bottom - ann_gap)
+    gc.endPage()
+
+    # Page 3 — annotations only when they didn't fit on page 2
+    if ann_list and not fits_on_p2:
+        _begin_page()
+        _draw_page_header(f"Logbook — {period_title}", subtitle="Annotations")
+        _draw_annotations(ann_list, MARGIN, PAGE_H - MARGIN - header_h)
+        gc.endPage()
+
+    gc.endDocument()
+
+    # Flush and write to disk
+    if not pdf_data.writeToFile_atomically_(path, True):
+        raise RuntimeError(f"Could not write PDF to {path}")
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -2594,6 +2986,15 @@ class ReportWindowController(NSObject):
         self._btn_clear_filter = btn_clear
         filter_bar.addView_inGravity_(btn_clear, 1)
 
+        # "Export PDF…" button — always visible, trailing gravity
+        btn_pdf = NSButton.buttonWithTitle_target_action_(
+            "⬇ Export PDF…", self, "exportPDF:"
+        )
+        btn_pdf.setBezelStyle_(4)   # NSBezelStyleRounded / inline
+        btn_pdf.setFont_(NSFont.systemFontOfSize_(11))
+        btn_pdf.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        filter_bar.addView_inGravity_(btn_pdf, 3)   # gravity 3 = trailing
+
         filter_scroll = NSView.alloc().initWithFrame_(
             NSRect(NSPoint(0, 0), NSSize(self._win_w, FILTER_H))
         )
@@ -2841,6 +3242,135 @@ class ReportWindowController(NSObject):
         if period == "custom":
             avail_h -= getattr(self, "_custom_picker_h", 32.0)
         cb(avail_h=avail_h)
+
+    @objc.typedSelector(b"v@:@")
+    def exportPDF_(self, sender):
+        """Collect current view data, write a temp PDF, and open it in Preview."""
+        import tempfile
+
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"Logbook-{date.today().strftime('%Y-%m-%d')}.pdf",
+        )
+
+        # Determine active period/range and filter
+        selected = self._tab_view.selectedTabViewItem()
+        period = selected.identifier() if selected else "day"
+
+        if period == "custom":
+            start_date = self._custom_start
+            end_date   = self._custom_end
+            today_d = date.today()
+            if end_date > today_d:
+                end_date = today_d
+            period_title = (f"{start_date.strftime('%-d %b %Y')} – "
+                            f"{end_date.strftime('%-d %b %Y')}")
+
+            def _count_wdays(s, e):
+                n, d = 0, s
+                while d <= e:
+                    if d.weekday() < 5:
+                        n += 1
+                    d += timedelta(days=1)
+                return n
+
+            WORKDAY_SECS = self._workday_hours * 3600
+            target_secs = _count_wdays(start_date, end_date) * WORKDAY_SECS
+        else:
+            offset = self._offsets.get(period, 0)
+            start_date, end_date, period_title = date_range_for(period, offset)
+            WORKDAY_SECS = self._workday_hours * 3600
+
+            def _count_wdays(s, e):
+                n, d = 0, s
+                while d <= e:
+                    if d.weekday() < 5:
+                        n += 1
+                    d += timedelta(days=1)
+                return n
+
+            if period == "day":
+                target_secs = (WORKDAY_SECS
+                               if start_date.weekday() < 5 else 0.0)
+            else:
+                target_secs = _count_wdays(start_date, end_date) * WORKDAY_SECS
+
+        # Fetch and filter intervals (same logic as build_report_view)
+        start_str = start_date.strftime("%Y-%m-%dT00:00:00")
+        end_str   = (end_date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+        out = run_timew("export", start_str, "-", end_str)
+        intervals = _parse_intervals(out)
+
+        filter_tags = self._filter_tags
+        if filter_tags is not None:
+            filtered = []
+            for inv in intervals:
+                matched = [t for t in inv["tags"] if t in filter_tags]
+                if matched:
+                    filtered.append({**inv, "tags": matched})
+            intervals = filtered
+
+        seen_tags, tag_set = [], set()
+        for inv in intervals:
+            for t in inv["tags"] or ["(untagged)"]:
+                if t not in tag_set:
+                    seen_tags.append(t)
+                    tag_set.add(t)
+        all_tags = seen_tags
+        tag_index = {t: i for i, t in enumerate(all_tags)}
+
+        tag_totals = defaultdict(float)
+        for inv in intervals:
+            for t in inv["tags"] or ["(untagged)"]:
+                tag_totals[t] += inv["duration"]
+        grand_total = sum(tag_totals.values())
+
+        by_date = defaultdict(list)
+        for inv in intervals:
+            by_date[inv["start"].date()].append(inv)
+
+        today_d = date.today()
+        if period == "day":
+            rows = [(start_date.strftime("%-d %b"), start_date,
+                     by_date.get(start_date, []))]
+        else:
+            rows = []
+            d = start_date
+            while d <= end_date:
+                day_invs = by_date.get(d, [])
+                if day_invs or self._show_empty_days or d == today_d:
+                    rows.append((d.strftime("%-d %b"), d, day_invs))
+                d += timedelta(days=1)
+
+        if intervals:
+            hour_start = min(inv["start"].hour for inv in intervals)
+            hour_end   = max(
+                inv["end"].hour + (1 if inv["end"].minute or inv["end"].second else 0)
+                for inv in intervals
+            )
+            hour_start = max(0, hour_start)
+            hour_end   = min(24, hour_end)
+            if hour_end <= hour_start:
+                hour_end = min(24, hour_start + 1)
+        else:
+            hour_start, hour_end = 0, 24
+
+        try:
+            export_logbook_pdf(
+                start_date, end_date, period_title, intervals,
+                all_tags, tag_index, tag_totals, grand_total,
+                target_secs, rows, hour_start, hour_end, path,
+            )
+        except Exception as exc:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("PDF export failed")
+            alert.setInformativeText_(str(exc))
+            alert.runModal()
+            return
+
+        # Open the file in Preview
+        import subprocess as _sp
+        _sp.Popen(["open", path])
 
     @objc.typedSelector(b"v@:@")
     def windowWillClose_(self, notification):
