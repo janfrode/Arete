@@ -2,11 +2,12 @@
 # Arete — incremental build
 #
 # Targets:
-#   all            → dist/Arete.dmg  (default)
-#   dist/Arete.dmg → full DMG
-#   run            → build app if needed, then launch it
-#   timew          → build bundled timew binary only
-#   clean          → remove build/, dist/, timew, .timew-*, Arete.icns, icon.png
+#   all                → dist/Arete.dmg  (default, contains both apps)
+#   dist/Arete.dmg     → combined DMG (Arete + Logbook)
+#   run                → build Arete.app if needed, then launch it
+#   run-logbook        → build Logbook.app if needed, then launch it
+#   timew              → build bundled timew binary only
+#   clean              → remove build/, dist/, timew, .timew-*, Arete.icns, icon.png
 #
 # Override the Python interpreter:
 #   make PYTHON=/path/to/python3
@@ -33,10 +34,10 @@ PYTHON_BIN := $(or \
     done) \
 )
 
-PY_SOURCES := arete.py timereport.py setup.py
+PY_SOURCES := arete.py timereport.py setup.py setup_logbook.py
 
 # --------------------------------------------------------------------------
-.PHONY: all run timew clean
+.PHONY: all run run-logbook timew clean
 # timew is a convenience alias only — not a build input itself
 
 all: dist/Arete.dmg
@@ -49,13 +50,21 @@ run: dist/Arete.app/Contents/MacOS/Arete
 	dist/Arete.app/Contents/MacOS/Arete
 
 # --------------------------------------------------------------------------
-# dist/Arete.dmg
+# run-logbook — build the logbook app then launch it directly
 # --------------------------------------------------------------------------
-dist/Arete.dmg: dist/Arete.app/Contents/MacOS/Arete
+run-logbook: .logbook-built
+	@echo "==> Launching Arête Logbook..."
+	"dist/Arête Logbook.app/Contents/MacOS/Arête Logbook"
+
+# --------------------------------------------------------------------------
+# dist/Arete.dmg — combined DMG with both apps
+# --------------------------------------------------------------------------
+dist/Arete.dmg: dist/Arete.app/Contents/MacOS/Arete .logbook-built
 	@echo "==> Assembling DMG..."
 	rm -rf dist/dmg_temp
 	mkdir -p dist/dmg_temp
 	cp -R dist/Arete.app dist/dmg_temp/
+	cp -R "dist/Arête Logbook.app" "dist/dmg_temp/Arête Logbook.app"
 	ln -s /Applications dist/dmg_temp/Applications
 	rm -f dist/Arete.dmg
 	hdiutil create -volname "Arete" -srcfolder dist/dmg_temp -ov -format UDZO \
@@ -74,6 +83,19 @@ dist/Arete.app/Contents/MacOS/Arete: $(VENV_PYTHON) Arete.icns .timew-$(TIMEW_VE
 	@echo "==> Building Arete.app with py2app..."
 	rm -rf build dist/Arete.app
 	$(VENV_PYTHON) setup.py py2app
+
+# --------------------------------------------------------------------------
+# dist/Arête Logbook.app — standalone logbook, py2app bundle
+# Uses a stamp file (.logbook-built) as the make target because the real
+# executable path contains an accent and a space, both of which break make
+# target parsing.
+# --------------------------------------------------------------------------
+.logbook-built: $(VENV_PYTHON) Arete.icns .timew-$(TIMEW_VERSION) $(PY_SOURCES) version Changes.md
+	@[ -s version ] || { echo "ERROR: version file is empty"; exit 1; }
+	@echo "==> Building Arête Logbook.app with py2app..."
+	rm -rf build "dist/Arête Logbook.app"
+	$(VENV_PYTHON) setup_logbook.py py2app
+	touch .logbook-built
 
 # --------------------------------------------------------------------------
 # Arete.icns — regenerated when generate_icon.py changes
@@ -146,6 +168,10 @@ $(VENV_PYTHON): requirements.txt
 clean:
 	@echo "==> Cleaning..."
 	rm -rf build dist
-	rm -f timew .timew-*
+	rm -f timew .timew-* .logbook-built
 	rm -f Arete.icns icon.png
 	@echo "  Done. (.venv preserved — rm -rf .venv to also wipe it)"
+
+# --------------------------------------------------------------------------
+# justfile shims — 'just build' and 'just run' still work
+# --------------------------------------------------------------------------

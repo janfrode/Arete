@@ -2,6 +2,7 @@
 
 ## 1.0.11
 - Add PDF exports
+- Standalone Logbook app
 
 ## 1.0.10
 - Edit tasks in logbook
