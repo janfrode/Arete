@@ -53,7 +53,7 @@ python3 arete.py
 To package Arête as a standalone macOS `.app` bundle inside a drag-and-drop `.dmg` installer, just run:
 
 ```
-git clone https://github.com/janfrode/Arete.git
+git clone https://tanso.net/Arete.git
 cd Arete
 make
 ```
