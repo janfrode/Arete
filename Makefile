@@ -29,7 +29,10 @@ PYTHON_BIN := $(or \
         p="/Library/Frameworks/Python.framework/Versions/$$v/bin/python$$v"; \
         [ -x "$$p" ] && echo "$$p" && break; \
     done), \
-    $(shell for p in $(PYENV_ROOT)/versions/3.11.*/bin/python3; do \
+    $(shell for p in \
+            $(PYENV_ROOT)/versions/3.13.*/bin/python3 \
+            $(PYENV_ROOT)/versions/3.12.*/bin/python3 \
+            $(PYENV_ROOT)/versions/3.11.*/bin/python3; do \
         [ -x "$$p" ] && echo "$$p" && break; \
     done) \
 )
@@ -143,25 +146,34 @@ timew: .timew-$(TIMEW_VERSION)
 $(VENV_PYTHON): requirements.txt
 	@echo "==> Setting up virtual environment..."
 	@if [ -z "$(PYTHON_BIN)" ]; then \
-	    echo "ERROR: No Python 3.11+ found. Set PYTHON=/path/to/python3." >&2; \
-	    exit 1; \
-	fi
-	@echo "  Using: $(PYTHON_BIN)"
-	@# Replace venv if built against a different Python
-	@if [ -f "$(VENV_PYTHON)" ]; then \
+	    echo "  No Python 3.11+ found — bootstrapping via pyenv..."; \
+	    PYENV_ROOT="$(PYENV_ROOT)"; \
+	    if [ ! -x "$$PYENV_ROOT/bin/pyenv" ]; then \
+	        echo "  Installing pyenv..."; \
+	        curl -fsSL https://pyenv.run | bash; \
+	    fi; \
+	    export PATH="$$PYENV_ROOT/bin:$$PYENV_ROOT/shims:$$PATH"; \
+	    eval "$$(pyenv init -)"; \
+	    pyenv install --skip-existing 3.11; \
+	    pyenv local 3.11; \
+	    PYTHON_BIN="$$(pyenv which python3)"; \
+	else \
+	    PYTHON_BIN="$(PYTHON_BIN)"; \
+	fi; \
+	echo "  Using: $$PYTHON_BIN ($$($$PYTHON_BIN --version))"; \
+	if [ -f "$(VENV_PYTHON)" ]; then \
 	    cur="$$($(VENV_PYTHON) --version 2>&1)"; \
-	    want="$$($(PYTHON_BIN) --version 2>&1)"; \
+	    want="$$($$PYTHON_BIN --version 2>&1)"; \
 	    if [ "$$cur" != "$$want" ]; then \
 	        echo "  Replacing stale venv ($$cur → $$want)..."; \
 	        rm -rf "$(VENV)"; \
 	    fi; \
-	fi
-	@[ -f "$(VENV_PYTHON)" ] || $(PYTHON_BIN) -m venv "$(VENV)"
-	$(VENV_PIP) install --upgrade pip --quiet
+	fi; \
+	[ -f "$(VENV_PYTHON)" ] || $$PYTHON_BIN -m venv "$(VENV)"; \
+	$(VENV_PIP) install --upgrade pip --quiet; \
 	$(VENV_PIP) install --upgrade py2app cmake rumps pyobjc \
-	    -r requirements.txt --quiet
+	    -r requirements.txt --quiet; \
 	touch $(VENV_PYTHON)
-
 # --------------------------------------------------------------------------
 # clean
 # --------------------------------------------------------------------------
