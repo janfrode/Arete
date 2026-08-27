@@ -2453,7 +2453,7 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
         y -= ROW_H * 0.6
         _ns_color(0.7, 0.7, 0.7).set()
         _stroke_line(x, y, x + 360, y)
-        y -= ROW_H * 0.5
+        y -= ROW_H * 0.9
 
         for tag in sorted_tags:
             secs  = tag_totals.get(tag, 0)
@@ -2614,7 +2614,7 @@ def export_logbook_pdf(start_date, end_date, period_title, intervals,
         y -= ANN_ROW_H * 0.5
         _ns_color(0.75, 0.75, 0.75).set()
         _stroke_line(x, y, PAGE_W - MARGIN, y, lw=0.4)
-        y -= ANN_ROW_H * 0.6
+        y -= ANN_ROW_H * 0.9
 
         for inv in ann_list:
             time_str = inv["end"].strftime("%-d %b  %-H:%M")
