@@ -1,5 +1,8 @@
 # What's New in Arête
 
+## 1.0.12
+- Fix honoring show_empty_days in logbook
+
 ## 1.0.11
 - Add PDF exports
 - Standalone Logbook app

@@ -3418,7 +3418,22 @@ def main():
         if _icon:
             app.setApplicationIconImage_(_icon)
 
-    controller = ReportWindowController.alloc().init()
+    # Read user preferences from ~/.arete.json so the standalone Logbook app
+    # honours the same settings as the menu-bar applet.
+    _config_path = os.path.expanduser("~/.arete.json")
+    _config = {}
+    try:
+        import json as _json
+        if os.path.exists(_config_path):
+            with open(_config_path) as _f:
+                _config = _json.load(_f)
+    except Exception:
+        pass
+    _workday_hours  = float(_config.get("workday_hours", 7.5))
+    _show_empty_days = bool(_config.get("show_empty_days", True))
+
+    controller = ReportWindowController.alloc().initWithWorkdayHours_showEmptyDays_(
+        _workday_hours, _show_empty_days)
     controller._standalone = True
     controller.show()
 
