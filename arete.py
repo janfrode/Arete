@@ -16,6 +16,7 @@ import sys
 import threading
 import urllib.request
 import importlib.util
+import atexit
 from Foundation import NSDistributedNotificationCenter, NSObject, NSTimer, NSString, NSDate as _NSDate
 from AppKit import (
     NSApplication, NSApplicationActivationPolicyAccessory,
@@ -50,9 +51,10 @@ def _read_version():
 VERSION = _read_version()
 
 
-def _make_menubar_icon():
+def _make_menubar_icon(progress=None):
     """Render a 44×44 pixel icon at 22×22 pt logical size for the menu bar.
 
+    If progress is a float (0.0 to 1.0+), a progress ring is drawn around the logo.
     Returns the path to a temp PNG, or None on failure.
     macOS template images must end in 'Template' — rumps handles that when
     template=True is passed, but we set NSImage.setTemplate_ directly instead.
@@ -88,6 +90,38 @@ def _make_menubar_icon():
         r  = NSRect(NSPoint(x0, bar_cy - bar_h / 2), NSSize(x1 - x0, bar_h))
         p  = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(r, radius, radius)
         p.fill()
+
+    # Draw progress ring if provided
+    if progress is not None:
+        r_ring = 20.0
+        center = NSPoint(cx, cy)
+        
+        # 1. Background faint track
+        bg_track = NSBezierPath.bezierPath()
+        bg_track.setLineWidth_(2.0)
+        bg_track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            center, r_ring, 0.0, 360.0, False
+        )
+        NSColor.blackColor().colorWithAlphaComponent_(0.15).set()
+        bg_track.stroke()
+        
+        # 2. Active progress path
+        p_val = min(1.0, max(0.0, progress))
+        if p_val > 0.0:
+            active_track = NSBezierPath.bezierPath()
+            active_track.setLineWidth_(2.0)
+            active_track.setLineCapStyle_(1) # NSLineCapStyleRound
+            
+            # Cocoa/AppKit: 0 is at 3 o'clock. 90 is at 12 o'clock.
+            # Clockwise progress starting from 12 o'clock:
+            start_angle = 90.0
+            end_angle = 90.0 - 360.0 * p_val
+            
+            active_track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+                center, r_ring, start_angle, end_angle, True
+            )
+            NSColor.blackColor().set()
+            active_track.stroke()
 
     img.unlockFocus()
     # Set logical size to 22×22 pt so macOS uses exactly one status-item slot.
@@ -2241,11 +2275,14 @@ class TimeBar(rumps.App):
         self._active_tags_cache = set()
         self._config = load_config()
         self._locked_active_tags = set()
+        self._current_progress_icon_path = None
         # Pre-render the monochrome template icon for the idle menu bar state
         self._menubar_icon_path = _make_menubar_icon()
         if self._menubar_icon_path:
             self.icon = self._menubar_icon_path
             self.template = True
+
+        atexit.register(self._cleanup_temp_files)
 
         # Show splash while the first timew calls are in flight
         self._splash = SplashWindow.alloc().init()
@@ -2302,22 +2339,43 @@ class TimeBar(rumps.App):
         recent_range = self._config.get("recent_range", ":month")
         recent_tags = get_recent_tags(recent_range)
         all_tags = get_all_tags()
+
+        pinned_tags = self._config.get("pinned_tags", [])
+        all_tags_set = set(all_tags)
+        pinned_exist = sorted([t for t in pinned_tags if t in all_tags_set])
+        pinned_set = set(pinned_exist)
         
         # Promote any active tags to the main menu
         main_tags = sorted(list(set(recent_tags) | active_tags))
-        older_tags = [t for t in all_tags if t not in main_tags]
+        unpinned_main = [t for t in main_tags if t not in pinned_set]
+        older_tags = [t for t in all_tags if t not in main_tags and t not in pinned_set]
 
-        if not main_tags and not older_tags:
+        if not pinned_exist and not unpinned_main and not older_tags:
             self.menu.add(rumps.MenuItem("(no tags found)"))
         else:
-            for tag in main_tags:
-                item = rumps.MenuItem(tag, callback=self._toggle_tag)
-                item.tag_name = tag
-                self._tag_items[tag] = item
-                self.menu.add(item)
+            # 1. Pinned tags (always on top)
+            if pinned_exist:
+                for tag in pinned_exist:
+                    item = rumps.MenuItem(tag, callback=self._toggle_tag)
+                    item.tag_name = tag
+                    self._tag_items[tag] = item
+                    self.menu.add(item)
+                
+                # Separator if there are other unpinned tags to show below
+                if unpinned_main or older_tags:
+                    self.menu.add(rumps.separator)
 
+            # 2. Main unpinned tags (recent + active)
+            if unpinned_main:
+                for tag in unpinned_main:
+                    item = rumps.MenuItem(tag, callback=self._toggle_tag)
+                    item.tag_name = tag
+                    self._tag_items[tag] = item
+                    self.menu.add(item)
+
+            # 3. Older tags submenu
             if older_tags:
-                if main_tags:
+                if unpinned_main:
                     self.menu.add(rumps.separator)
 
                 older_menu = rumps.MenuItem("Older tags")
@@ -2330,6 +2388,16 @@ class TimeBar(rumps.App):
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
+
+        # Build Pin/Unpin tags submenu
+        if all_tags:
+            pin_menu = rumps.MenuItem("Pin / unpin tags")
+            for tag in all_tags:
+                item = rumps.MenuItem(tag, callback=self._toggle_pin)
+                item.tag_name = tag
+                item.state = tag in pinned_set
+                pin_menu.add(item)
+            self.menu.add(pin_menu)
 
         # "Add additional tag" and "Annotate active task" — only shown when tracking
         if active_tags:
@@ -2420,6 +2488,17 @@ class TimeBar(rumps.App):
         else:
             start_tag(tag)
             self._update_state()
+
+    def _toggle_pin(self, sender):
+        tag = getattr(sender, "tag_name", sender.title)
+        pinned = self._config.setdefault("pinned_tags", [])
+        if tag in pinned:
+            pinned.remove(tag)
+        else:
+            pinned.append(tag)
+        save_config(self._config)
+        self._build_menu()
+        self._update_state()
 
     def _annotate_active(self, _):
         """Open annotation dialog for the currently active interval (@1)."""
@@ -2590,6 +2669,20 @@ class TimeBar(rumps.App):
     # State sync
     # ------------------------------------------------------------------
 
+    def _cleanup_temp_files(self):
+        # Clean up the main static icon
+        if getattr(self, "_menubar_icon_path", None) and os.path.exists(self._menubar_icon_path):
+            try:
+                os.unlink(self._menubar_icon_path)
+            except Exception:
+                pass
+        # Clean up the dynamic progress icon
+        if getattr(self, "_current_progress_icon_path", None) and os.path.exists(self._current_progress_icon_path):
+            try:
+                os.unlink(self._current_progress_icon_path)
+            except Exception:
+                pass
+
     def _update_state(self):
         active, duration = get_active_tracking_info()
         
@@ -2615,19 +2708,63 @@ class TimeBar(rumps.App):
             else:
                 item.title = tag
 
+        workday_hours = self._config.get("workday_hours", 7.5)
+        
+        # Calculate dynamic progress if workday target is set
+        progress = None
+        if workday_hours > 0.0:
+            try:
+                intervals = get_today_intervals()
+                total_seconds = sum((inv["end"] - inv["start"]).total_seconds() for inv in intervals)
+                progress = total_seconds / (workday_hours * 3600.0)
+            except Exception as e:
+                print(f"Error calculating progress: {e}")
+
+        # Generate the appropriate icon path for this state
+        icon_to_show = None
+        if progress is not None:
+            # Render icon with progress ring
+            try:
+                new_icon_path = _make_menubar_icon(progress)
+                # Clean up the previous dynamic progress icon if one exists
+                old_icon_path = getattr(self, "_current_progress_icon_path", None)
+                if old_icon_path and os.path.exists(old_icon_path):
+                    try:
+                        os.unlink(old_icon_path)
+                    except Exception:
+                        pass
+                self._current_progress_icon_path = new_icon_path
+                icon_to_show = new_icon_path
+            except Exception as e:
+                print(f"Error drawing progress icon: {e}")
+                icon_to_show = self._menubar_icon_path
+        else:
+            # No workday target: use the static standard icon (and clean up any existing dynamic progress icon)
+            icon_to_show = self._menubar_icon_path
+            old_icon_path = getattr(self, "_current_progress_icon_path", None)
+            if old_icon_path and os.path.exists(old_icon_path):
+                try:
+                    os.unlink(old_icon_path)
+                except Exception:
+                    pass
+            self._current_progress_icon_path = None
+
         if active:
-            # Show the active tags as text; hide the icon so text stands alone.
+            # Show the active tags as text next to the icon
             # Truncate to 20 chars to avoid overflowing the menu bar.
             title = ",".join(sorted(active))
             if len(title) > 20:
                 title = title[:19] + "…"
-            self.icon = None
             self.title = title
+            
+            if icon_to_show:
+                self.icon = icon_to_show
+                self.template = True
         else:
             # Idle: show only the logo, no text
             self.title = ""
-            if self._menubar_icon_path:
-                self.icon = self._menubar_icon_path
+            if icon_to_show:
+                self.icon = icon_to_show
                 self.template = True
 
 

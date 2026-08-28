@@ -2701,7 +2701,7 @@ class ReportWindowController(NSObject):
         if self is None:
             return None
         self._standalone = False  # set to True by main() when run as own process
-        self._workday_hours = workday_hours
+        self._workday_hours = 0.0
         self._show_empty_days = bool(show_empty_days)
         # offsets: how many periods back from current (0 = current)
         self._offsets = {"day": 0, "week": 0, "month": 0}

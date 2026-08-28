@@ -1,5 +1,10 @@
 # What's New in Arête
 
+## 1.0.13
+- **Daily Work-Target Progress Ring** - displays a circular progress ring around the menu bar icon showing your today's tracked hours relative to your daily target. Dynamically updates every 5 seconds. The progress ring is omitted (leaving the standard logo) if your daily work target is set to 0.
+- Remove "target" hours from logbook.
+- **Pinned Tasks** — added a new "Pin / unpin tags" submenu letting you pin specific tags to the top of your menu list for quick, instant access. Pinned tasks persistently stay at the very top of your primary dropdown list.
+
 ## 1.0.12
 - Fix honoring show_empty_days in logbook
 
