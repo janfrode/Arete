@@ -33,7 +33,9 @@ from AppKit import (
     NSVisualEffectStateActive, NSFontManager, NSView,
     NSCursor,
     NSDatePicker, NSDatePickerStyleTextFieldAndStepper,
-    NSDatePickerElementFlagHourMinute,
+    NSDatePickerElementFlagHourMinute, NSDatePickerElementFlagYearMonthDay,
+    NSPopUpButton,
+    NSMenuItem,
 )
 from datetime import datetime, timezone, timedelta
 import objc
@@ -611,6 +613,535 @@ class NewTagWindow(NSObject):
             self.app._update_state()
 
 
+class AddPastTaskPreviewView(NSView):
+    """Draws a live timeline preview of a single day, showing existing tasks
+    as grey/blue bars, and the new task as a green (or red on overlap) bar.
+    """
+    def initWithFrame_(self, frame):
+        self = objc.super(AddPastTaskPreviewView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._intervals = []  # list of dicts with local start/end times
+        self._new_start = None
+        self._new_end = None
+        self._hour_start = 8
+        self._hour_end = 18
+        self.window_controller = None
+        self.setAutoresizingMask_(NSViewWidthSizable)
+        return self
+
+    def acceptsFirstResponder(self):
+        return True
+
+    def mouseDown_(self, event):
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        self._drag_start_x = pt.x
+        self._drag_current_x = pt.x
+        self._is_dragging = True
+        self._update_times_from_drag()
+
+    def mouseDragged_(self, event):
+        if not getattr(self, "_is_dragging", False):
+            return
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        self._drag_current_x = pt.x
+        self._update_times_from_drag()
+
+    def mouseUp_(self, event):
+        self._is_dragging = False
+
+    @objc.python_method
+    def _update_times_from_drag(self):
+        if getattr(self, "window_controller", None) is None:
+            return
+        
+        bounds = self.bounds()
+        width = bounds.size.width
+        pad_left = 15.0
+        pad_right = 15.0
+        graph_w = width - pad_left - pad_right
+        if graph_w <= 0:
+            return
+            
+        total_hours = self._hour_end - self._hour_start
+        
+        def x_to_time(x):
+            fraction = (x - pad_left) / graph_w
+            fraction = max(0.0, min(1.0, fraction))
+            delta_hours = fraction * total_hours
+            total_minutes = int(round(delta_hours * 60))
+            h = self._hour_start + (total_minutes // 60)
+            m = total_minutes % 60
+            if h >= 24:
+                h = 23
+                m = 59
+            return h, m
+            
+        sh, sm = x_to_time(min(self._drag_start_x, self._drag_current_x))
+        eh, em = x_to_time(max(self._drag_start_x, self._drag_current_x))
+        
+        if sh == eh and sm == em:
+            # Min duration 15 minutes
+            eh, em = x_to_time(min(self._drag_start_x, self._drag_current_x) + (15.0 * graph_w / (total_hours * 60.0)))
+            
+        self.window_controller.previewDraggedToStartHour_startMinute_endHour_endMinute_(sh, sm, eh, em)
+
+    @objc.python_method
+    def updateData_newStart_newEnd_(self, intervals, new_start, new_end):
+        self._intervals = intervals
+        self._new_start = new_start
+        self._new_end = new_end
+        
+        hours = [8, 18]
+        if new_start:
+            hours.append(new_start.hour)
+        if new_end:
+            hours.append(new_end.hour)
+        for inv in intervals:
+            hours.append(inv["start"].hour)
+            hours.append(inv["end"].hour)
+            
+        self._hour_start = max(0, min(hours) - 1)
+        self._hour_end = min(23, max(hours) + 1)
+        
+        if (self._hour_end - self._hour_start) < 8:
+            diff = 8 - (self._hour_end - self._hour_start)
+            self._hour_start = max(0, self._hour_start - diff // 2)
+            self._hour_end = min(23, self._hour_start + 8)
+            if (self._hour_end - self._hour_start) < 8:
+                self._hour_start = max(0, self._hour_end - 8)
+                
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, dirty_rect):
+        bounds = self.bounds()
+        width = bounds.size.width
+        height = bounds.size.height
+        
+        NSColor.windowBackgroundColor().set()
+        NSBezierPath.fillRect_(bounds)
+        NSGraphicsContext.currentContext().setShouldAntialias_(True)
+        
+        pad_left = 15.0
+        pad_right = 15.0
+        pad_top = 18.0
+        pad_bottom = 8.0
+        
+        graph_w = width - pad_left - pad_right
+        graph_h = height - pad_top - pad_bottom
+        
+        total_hours = self._hour_end - self._hour_start
+        if total_hours <= 0:
+            total_hours = 1
+            
+        def get_x(dt):
+            if not dt:
+                return pad_left
+            delta_hours = (dt.hour - self._hour_start) + (dt.minute / 60.0) + (dt.second / 3600.0)
+            fraction = delta_hours / total_hours
+            fraction = max(0.0, min(1.0, fraction))
+            return pad_left + fraction * graph_w
+
+        font = NSFont.systemFontOfSize_(8.0)
+        text_color = NSColor.secondaryLabelColor()
+        attrs = {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: text_color
+        }
+        
+        line_path = NSBezierPath.bezierPath()
+        line_path.setLineWidth_(0.5)
+        line_path.moveToPoint_(NSPoint(pad_left, height - pad_top))
+        line_path.lineToPoint_(NSPoint(width - pad_right, height - pad_top))
+        NSColor.separatorColor().set()
+        line_path.stroke()
+        
+        step = 1 if total_hours <= 12 else 2
+        for h in range(self._hour_start, self._hour_end + 1, step):
+            fraction = (h - self._hour_start) / total_hours
+            x = pad_left + fraction * graph_w
+            
+            grid_path = NSBezierPath.bezierPath()
+            grid_path.setLineWidth_(0.5)
+            grid_path.moveToPoint_(NSPoint(x, height - pad_top))
+            grid_path.lineToPoint_(NSPoint(x, pad_bottom))
+            NSColor.separatorColor().set()
+            grid_path.stroke()
+            
+            label = NSString.stringWithString_(f"{h:02d}")
+            label_size = label.sizeWithAttributes_(attrs)
+            label.drawAtPoint_withAttributes_(
+                NSPoint(x - label_size.width / 2.0, height - pad_top + 2),
+                attrs
+            )
+
+        lane_height = graph_h
+        y = pad_bottom + 1.0
+        
+        for inv in self._intervals:
+            x_start = get_x(inv["start"])
+            x_end = get_x(inv["end"])
+            if x_end - x_start < 2.0:
+                x_end = x_start + 2.0
+                
+            bar_rect = NSRect(NSPoint(x_start, y), NSSize(x_end - x_start, lane_height - 2.0))
+            bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                bar_rect, (lane_height - 2.0) / 4.0, (lane_height - 2.0) / 4.0
+            )
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.5, 0.5, 0.5, 0.35).set()
+            bar_path.fill()
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.5, 0.5, 0.5, 0.6).set()
+            bar_path.setLineWidth_(0.75)
+            bar_path.stroke()
+
+        if self._new_start and self._new_end:
+            has_overlap = False
+            for inv in self._intervals:
+                overlap_start = max(inv["start"], self._new_start)
+                overlap_end = min(inv["end"], self._new_end)
+                if overlap_start < overlap_end:
+                    has_overlap = True
+                    break
+                    
+            x_start = get_x(self._new_start)
+            x_end = get_x(self._new_end)
+            if x_end - x_start < 2.0:
+                x_end = x_start + 2.0
+                
+            bar_rect = NSRect(NSPoint(x_start, y), NSSize(x_end - x_start, lane_height - 2.0))
+            bar_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                bar_rect, (lane_height - 2.0) / 4.0, (lane_height - 2.0) / 4.0
+            )
+            
+            if has_overlap:
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.92, 0.26, 0.21, 0.35).set()
+                bar_path.fill()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.92, 0.26, 0.21, 0.95).set()
+                bar_path.setLineWidth_(1.5)
+                bar_path.stroke()
+            else:
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.18, 0.67, 0.38, 0.35).set()
+                bar_path.fill()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.18, 0.67, 0.38, 0.95).set()
+                bar_path.setLineWidth_(1.5)
+                bar_path.stroke()
+
+
+class AddPastTaskWindow(NSObject):
+    """Dialog for tracking a past task (creating a new past interval)."""
+
+    def initWithApp_(self, app):
+        self = objc.super(AddPastTaskWindow, self).init()
+        if self is None:
+            return None
+        self.app = app
+        self._pref_start = None
+        self._pref_end = None
+        self._on_save = None
+        return self
+
+    @objc.typedSelector(b"@@:@@@@")
+    def initWithApp_startDt_endDt_onSave_(self, app, start_dt, end_dt, on_save):
+        self = objc.super(AddPastTaskWindow, self).init()
+        if self is None:
+            return None
+        self.app = app
+        self._pref_start = start_dt
+        self._pref_end = end_dt
+        self._on_save = on_save
+        return self
+
+    def show(self):
+        style_mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSRect(NSPoint(0, 0), NSSize(420, 310)),
+            style_mask,
+            NSBackingStoreBuffered,
+            False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setTitle_("Register past task")
+        window.center()
+
+        stack = NSStackView.stackViewWithViews_([])
+        stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        stack.setSpacing_(10.0)
+        stack.setEdgeInsets_((16.0, 20.0, 16.0, 20.0))
+
+        LABEL_W = 80
+        FIELD_W = 280
+
+        def _row(label_text, view):
+            row = NSStackView.stackViewWithViews_([])
+            row.setOrientation_(0)
+            row.setAlignment_(8)  # Center Y
+            row.setSpacing_(8.0)
+            lbl = NSTextField.labelWithString_(label_text)
+            lbl.setFont_(NSFont.systemFontOfSize_(12))
+            lbl.setAlignment_(1)  # Right
+            lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            lbl.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
+            row.addView_inGravity_(lbl, 1)
+            row.addView_inGravity_(view, 1)
+            return row
+
+        # ── tags dropdown menu ───────────────────────────────────────────────
+        self.popup_tags = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSRect(NSPoint(0, 0), NSSize(FIELD_W, 24)), False
+        )
+        
+        config = self.app._config if (self.app is not None) else load_config()
+        recent_range = config.get("recent_range", ":month")
+        recent_tags = get_recent_tags(recent_range)
+        all_tags = get_all_tags()
+
+        pinned_tags = config.get("pinned_tags", [])
+        all_tags_set = set(all_tags)
+        pinned_exist = sorted([t for t in pinned_tags if t in all_tags_set])
+        pinned_set = set(pinned_exist)
+        
+        main_tags = sorted(list(set(recent_tags)))
+        unpinned_main = [t for t in main_tags if t not in pinned_set]
+        older_tags = [t for t in all_tags if t not in main_tags and t not in pinned_set]
+
+        menu = self.popup_tags.menu()
+        menu.removeAllItems()
+        
+        has_added = False
+        if pinned_exist:
+            for tag in pinned_exist:
+                menu.addItemWithTitle_action_keyEquivalent_(tag, None, "")
+            has_added = True
+            
+        if unpinned_main:
+            if has_added:
+                menu.addItem_(NSMenuItem.separatorItem())
+            for tag in unpinned_main:
+                menu.addItemWithTitle_action_keyEquivalent_(tag, None, "")
+            has_added = True
+            
+        if older_tags:
+            if has_added:
+                menu.addItem_(NSMenuItem.separatorItem())
+            for tag in older_tags:
+                menu.addItemWithTitle_action_keyEquivalent_(tag, None, "")
+            has_added = True
+            
+        if not has_added:
+            menu.addItemWithTitle_action_keyEquivalent_("(no tags)", None, "")
+
+        self.popup_tags.setTarget_(self)
+        self.popup_tags.setAction_("tagSelectionChanged:")
+        stack.addView_inGravity_(_row("Tags:", self.popup_tags), 1)
+
+        # ── date picker ──────────────────────────────────────────────────────
+        self.dp_date = NSDatePicker.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(120, 24)))
+        self.dp_date.setDatePickerStyle_(NSDatePickerStyleTextFieldAndStepper)
+        self.dp_date.setDatePickerElements_(NSDatePickerElementFlagYearMonthDay)
+        
+        now = datetime.now()
+        start_default = now - timedelta(hours=1)
+        end_default = now
+        
+        if getattr(self, "_pref_start", None) is not None:
+            start_default = self._pref_start
+        if getattr(self, "_pref_end", None) is not None:
+            end_default = self._pref_end
+
+        ns_date = _NSDate.dateWithTimeIntervalSince1970_(start_default.timestamp())
+        self.dp_date.setDateValue_(ns_date)
+        stack.addView_inGravity_(_row("Date:", self.dp_date), 1)
+
+        # ── start time picker ────────────────────────────────────────────────
+        self.dp_start = NSDatePicker.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(100, 24)))
+        self.dp_start.setDatePickerStyle_(NSDatePickerStyleTextFieldAndStepper)
+        self.dp_start.setDatePickerElements_(NSDatePickerElementFlagHourMinute)
+        
+        ns_start = _NSDate.dateWithTimeIntervalSince1970_(start_default.timestamp())
+        self.dp_start.setDateValue_(ns_start)
+        stack.addView_inGravity_(_row("Start Time:", self.dp_start), 1)
+
+        # ── end time picker ──────────────────────────────────────────────────
+        self.dp_end = NSDatePicker.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(100, 24)))
+        self.dp_end.setDatePickerStyle_(NSDatePickerStyleTextFieldAndStepper)
+        self.dp_end.setDatePickerElements_(NSDatePickerElementFlagHourMinute)
+        
+        ns_end = _NSDate.dateWithTimeIntervalSince1970_(end_default.timestamp())
+        self.dp_end.setDateValue_(ns_end)
+        stack.addView_inGravity_(_row("End Time:", self.dp_end), 1)
+
+        # ── live preview view ────────────────────────────────────────────────
+        self.preview_view = AddPastTaskPreviewView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(FIELD_W, 50))
+        )
+        self.preview_view.window_controller = self
+        self.preview_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        self.preview_view.heightAnchor().constraintEqualToConstant_(42.0).setActive_(True)
+        self.preview_view.widthAnchor().constraintEqualToConstant_(float(FIELD_W)).setActive_(True)
+        stack.addView_inGravity_(_row("Preview:", self.preview_view), 1)
+
+        self.dp_date.setTarget_(self)
+        self.dp_date.setAction_("dateTimeChanged:")
+        self.dp_start.setTarget_(self)
+        self.dp_start.setAction_("dateTimeChanged:")
+        self.dp_end.setTarget_(self)
+        self.dp_end.setAction_("dateTimeChanged:")
+
+        # ── chk_adjust ───────────────────────────────────────────────────────
+        self.chk_adjust = NSButton.buttonWithTitle_target_action_(
+            "Automatically fix overlaps (:adjust)", self, None
+        )
+        self.chk_adjust.setButtonType_(3)
+        self.chk_adjust.setState_(NSControlStateValueOn)  # default to On for track command
+        self.chk_adjust.setFont_(NSFont.systemFontOfSize_(11))
+        
+        row_chk = NSStackView.stackViewWithViews_([])
+        row_chk.setOrientation_(0)
+        row_chk.setSpacing_(8.0)
+        # Empty placeholder spacer to align with the labels
+        spacer = NSView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(LABEL_W, 1)))
+        spacer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        spacer.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
+        row_chk.addView_inGravity_(spacer, 1)
+        row_chk.addView_inGravity_(self.chk_adjust, 1)
+        stack.addView_inGravity_(row_chk, 1)
+
+        # ── error label ──────────────────────────────────────────────────────
+        self.lbl_error = NSTextField.labelWithString_("")
+        self.lbl_error.setTextColor_(NSColor.systemRedColor())
+        self.lbl_error.setFont_(NSFont.systemFontOfSize_(11))
+        
+        row_err = NSStackView.stackViewWithViews_([])
+        row_err.setOrientation_(0)
+        row_err.setSpacing_(8.0)
+        row_err.addView_inGravity_(spacer, 1)
+        row_err.addView_inGravity_(self.lbl_error, 1)
+        stack.addView_inGravity_(row_err, 1)
+
+        # ── buttons ──────────────────────────────────────────────────────────
+        btn_stack = NSStackView.stackViewWithViews_([])
+        btn_stack.setSpacing_(8.0)
+        btn_cancel = NSButton.buttonWithTitle_target_action_("Cancel", self, "cancel:")
+        btn_cancel.setKeyEquivalent_("\x1b")
+        btn_save = NSButton.buttonWithTitle_target_action_("Add Task", self, "add:")
+        btn_save.setKeyEquivalent_("\r")
+        btn_stack.addView_inGravity_(btn_cancel, 3)
+        btn_stack.addView_inGravity_(btn_save, 3)
+        
+        row_btn = NSStackView.stackViewWithViews_([])
+        row_btn.setOrientation_(0)
+        row_btn.setSpacing_(8.0)
+        row_btn.addView_inGravity_(spacer, 1)
+        row_btn.addView_inGravity_(btn_stack, 1)
+        stack.addView_inGravity_(row_btn, 1)
+
+        window.setContentView_(stack)
+        self.window = window
+        window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        window.makeFirstResponder_(self.popup_tags)
+
+        # Initial preview draw
+        self.dateTimeChanged_(None)
+
+    @objc.python_method
+    def previewDraggedToStartHour_startMinute_endHour_endMinute_(self, sh, sm, eh, em):
+        try:
+            picked_date = datetime.fromtimestamp(self.dp_date.dateValue().timeIntervalSince1970())
+            start_dt = picked_date.replace(hour=sh, minute=sm, second=0, microsecond=0)
+            end_dt = picked_date.replace(hour=eh, minute=em, second=0, microsecond=0)
+            
+            ns_start = _NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp())
+            ns_end = _NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp())
+            
+            self.dp_start.setDateValue_(ns_start)
+            self.dp_end.setDateValue_(ns_end)
+            self.dateTimeChanged_(None)
+        except Exception as e:
+            print(f"Error updating pickers from drag: {e}")
+
+    @objc.typedSelector(b"v@:@")
+    def tagSelectionChanged_(self, sender):
+        self.dateTimeChanged_(None)
+
+    @objc.typedSelector(b"v@:@")
+    def dateTimeChanged_(self, sender):
+        try:
+            picked_date = datetime.fromtimestamp(self.dp_date.dateValue().timeIntervalSince1970())
+            picked_start = datetime.fromtimestamp(self.dp_start.dateValue().timeIntervalSince1970())
+            picked_end = datetime.fromtimestamp(self.dp_end.dateValue().timeIntervalSince1970())
+
+            start_dt = picked_date.replace(hour=picked_start.hour, minute=picked_start.minute, second=0, microsecond=0).astimezone()
+            end_dt = picked_date.replace(hour=picked_end.hour, minute=picked_end.minute, second=0, microsecond=0).astimezone()
+
+            intervals = get_intervals_for_date(picked_date.date())
+            self.preview_view.updateData_newStart_newEnd_(intervals, start_dt, end_dt)
+
+            has_overlap = False
+            for inv in intervals:
+                overlap_start = max(inv["start"], start_dt)
+                overlap_end = min(inv["end"], end_dt)
+                if overlap_start < overlap_end:
+                    has_overlap = True
+                    break
+
+            if has_overlap:
+                self.lbl_error.setTextColor_(NSColor.systemRedColor())
+                self.lbl_error.setStringValue_("⚠️ Overlaps with an existing task!")
+            else:
+                self.lbl_error.setStringValue_("")
+        except Exception as e:
+            print(f"Error updating preview: {e}")
+
+    @objc.typedSelector(b"v@:@")
+    def cancel_(self, sender):
+        self.window.close()
+        if self.app is not None:
+            self.app._add_past_controller = None
+
+    @objc.typedSelector(b"v@:@")
+    def add_(self, sender):
+        tag = self.popup_tags.titleOfSelectedItem()
+        if not tag or tag == "(no tags)":
+            self.lbl_error.setStringValue_("At least one tag is required.")
+            return
+
+        tags = [tag]
+
+        # 1. Parse date from date picker
+        picked_date = datetime.fromtimestamp(self.dp_date.dateValue().timeIntervalSince1970())
+        # 2. Parse start/end times
+        picked_start = datetime.fromtimestamp(self.dp_start.dateValue().timeIntervalSince1970())
+        picked_end = datetime.fromtimestamp(self.dp_end.dateValue().timeIntervalSince1970())
+
+        # Construct start/end datetimes matching the picked date
+        start_dt = picked_date.replace(hour=picked_start.hour, minute=picked_start.minute, second=0, microsecond=0)
+        end_dt = picked_date.replace(hour=picked_end.hour, minute=picked_end.minute, second=0, microsecond=0)
+
+        if end_dt <= start_dt:
+            self.lbl_error.setStringValue_("End time must be after start time.")
+            return
+
+        def _dt_to_timew(dt):
+            return dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
+
+        adjust = self.chk_adjust.state() == NSControlStateValueOn
+        hints = [":adjust"] if adjust else []
+
+        try:
+            run_checked("track", _dt_to_timew(start_dt), "-", _dt_to_timew(end_dt), *(tags + hints))
+        except Exception as e:
+            self.lbl_error.setStringValue_(str(e))
+            return
+
+        self.window.close()
+        if self.app is not None:
+            self.app._add_past_controller = None
+            self.app._update_state()
+        if getattr(self, "_on_save", None) is not None:
+            self._on_save()
+
+
 class WhatsNewWindow(NSObject):
     """Scrollable window that displays Changes.md with basic Markdown rendering.
 
@@ -937,6 +1468,9 @@ class HelpWindow(NSObject):
          'Behaves exactly like the main tag list.'),
         ('New tag\u2026',
          'Opens a small dialog to type a new tag name and start tracking it immediately.'),
+        ('Register past task\u2026',
+         'Opens a dialog to track a task that occurred in the past. '
+         'You can select the date, specify the start and end times, type the tags, and optionally automatically resolve overlaps.'),
         ('Add tag\u2026 (submenu)',
          'Only visible while tracking. '
          'Lists all tags not currently active. '
@@ -1768,6 +2302,55 @@ def get_recent_tags(range_arg=":month"):
     return parse_tags_output(run("tags", *args))
 
 
+def get_intervals_for_date(day_date):
+    """Return tracked intervals for any date (date/datetime) as list of dicts with local start/end times."""
+    date_str = day_date.strftime("%Y-%m-%d")
+    out = run("export", date_str)
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except Exception:
+        return []
+
+    intervals = []
+    local_tz = datetime.now().astimezone().tzinfo
+
+    for item in data:
+        start_str = item.get("start")
+        if not start_str:
+            continue
+
+        try:
+            clean_start = start_str.replace("T", "").replace("Z", "+0000")
+            start_utc = datetime.strptime(clean_start, "%Y%m%d%H%M%S%z")
+        except Exception:
+            continue
+
+        start_local = start_utc.astimezone(local_tz)
+
+        end_str = item.get("end")
+        if end_str:
+            try:
+                clean_end = end_str.replace("T", "").replace("Z", "+0000")
+                end_utc = datetime.strptime(clean_end, "%Y%m%d%H%M%S%z")
+                end_local = end_utc.astimezone(local_tz)
+            except Exception:
+                end_local = datetime.now(local_tz)
+        else:
+            end_local = datetime.now(local_tz)
+
+        # Make sure the interval belongs to the requested day (sometimes timew exports adjacent days)
+        if start_local.date() == day_date or end_local.date() == day_date:
+            intervals.append({
+                "start": start_local,
+                "end": end_local,
+                "tags": item.get("tags", [])
+            })
+
+    return intervals
+
+
 def get_today_intervals():
     """Return today's tracked intervals as list of dicts with local start/end times."""
     out = run("export", ":day")
@@ -2276,6 +2859,7 @@ class TimeBar(rumps.App):
         self._config = load_config()
         self._locked_active_tags = set()
         self._current_progress_icon_path = None
+        self._add_past_controller = None
         # Pre-render the monochrome template icon for the idle menu bar state
         self._menubar_icon_path = _make_menubar_icon()
         if self._menubar_icon_path:
@@ -2388,6 +2972,7 @@ class TimeBar(rumps.App):
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
+        self.menu.add(rumps.MenuItem("Register past task", callback=self._add_past_task))
 
         # Build Pin/Unpin tags submenu
         if all_tags:
@@ -2449,6 +3034,14 @@ class TimeBar(rumps.App):
             return
         self._new_tag_controller = NewTagWindow.alloc().initWithApp_(self)
         self._new_tag_controller.show()
+
+    def _add_past_task(self, _):
+        if getattr(self, "_add_past_controller", None):
+            self._add_past_controller.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            return
+        self._add_past_controller = AddPastTaskWindow.alloc().initWithApp_(self)
+        self._add_past_controller.show()
 
     def _toggle_tag(self, sender):
         tag = getattr(sender, "tag_name", sender.title)

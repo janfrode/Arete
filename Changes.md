@@ -4,6 +4,8 @@
 - **Daily Work-Target Progress Ring** - displays a circular progress ring around the menu bar icon showing your today's tracked hours relative to your daily target. Dynamically updates every 5 seconds. The progress ring is omitted (leaving the standard logo) if your daily work target is set to 0.
 - Remove "target" hours from logbook.
 - **Pinned Tasks** — added a new "Pin / unpin tags" submenu letting you pin specific tags to the top of your menu list for quick, instant access. Pinned tasks persistently stay at the very top of your primary dropdown list.
+- **Register Past Tasks** — introduced a new "Register past task" menu entry allowing you to track tasks that occurred in the past. Opens a native window with interactive date and start/end time pickers, tag fields, and an optional ":adjust" checkbox to automatically reconcile any overlapping segments on save.
+- **Interactive Timeline Drag-to-Create** — you can now directly click and drag on any empty space in the Logbook timeline to select a time slot visually! Spawns a pre-filled "Register past task" window for that exact range, drawing a beautiful glowing semi-transparent green rounded highlight box that shows you exactly what tasks you are aligned with, preventing any overlapping surprises.
 
 ## 1.0.12
 - Fix honoring show_empty_days in logbook

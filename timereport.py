@@ -228,6 +228,8 @@ def tag_color(idx, alpha=1.0):
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, alpha)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Shared layout constants
 # ---------------------------------------------------------------------------
@@ -624,8 +626,35 @@ class TimelineView(NSView):
     #   tag         – tag string (for colour)
     #   gx0, gw     – graph_x0, graph_w
     #   t_start, t_end – axis span datetimes
+    #
+    # _create_drag: None | dict with keys:
+    #   start_dt, current_dt - datetimes for selection
+    #   day_date - date object
+    #   t_start, t_end - row axis limits
+    #   y_base, rh - row vertical coordinates
+    #   gx0, gw - axis horizontal coordinates
 
     _EDGE_HIT_PX = 8.0   # px from bar edge that counts as a handle grab
+
+    def _row_at_point(self, pt):
+        """Return (day_date, t_start, t_end, y_base, rh) for the row under pt.y, or None."""
+        height = self._height
+        y_cursor = height - PAD_TOP - ROW_GAP
+        tz = local_tz()
+        
+        for row_idx, (label_str, day_date, invs) in enumerate(self._rows):
+            rh = self._row_heights[row_idx]
+            y_base = y_cursor - rh
+            
+            if y_base - 1 <= pt.y <= y_base + rh + 1:
+                t_start = datetime(day_date.year, day_date.month, day_date.day,
+                                   self._hour_start, 0, 0, tzinfo=tz)
+                t_end = (datetime(day_date.year, day_date.month, day_date.day,
+                                  0, 0, 0, tzinfo=tz) + timedelta(hours=self._hour_end))
+                return day_date, t_start, t_end, y_base, rh
+                
+            y_cursor = y_base - ROW_GAP
+        return None
 
     def _edge_hit(self, pt):
         """Return (entry, "start"|"end") if pt is near a bar edge, else None."""
@@ -681,83 +710,129 @@ class TimelineView(NSView):
     def mouseDown_(self, event):
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
         edge_hit = self._edge_hit(pt)
-        if edge_hit is None:
-            self._drag = None
+        if edge_hit is not None:
+            entry, edge = edge_hit
+            rect, tag, start_dt, end_dt, _ann, interval_id, gx0, gw, t_start, t_end = entry
+            orig_dt = start_dt if edge == "start" else end_dt
+            self._drag = {
+                "edge":        edge,
+                "interval_id": interval_id,
+                "orig_dt":     orig_dt,
+                "current_dt":  orig_dt,
+                "rect":        rect,
+                "tag":         tag,
+                "gx0":         gx0,
+                "gw":          gw,
+                "t_start":     t_start,
+                "t_end":       t_end,
+            }
+            NSCursor.resizeLeftRightCursor().push()
             return
-        entry, edge = edge_hit
-        rect, tag, start_dt, end_dt, _ann, interval_id, gx0, gw, t_start, t_end = entry
-        orig_dt = start_dt if edge == "start" else end_dt
-        self._drag = {
-            "edge":        edge,
-            "interval_id": interval_id,
-            "orig_dt":     orig_dt,
-            "current_dt":  orig_dt,
-            "rect":        rect,
-            "tag":         tag,
-            "gx0":         gx0,
-            "gw":          gw,
-            "t_start":     t_start,
-            "t_end":       t_end,
-        }
-        NSCursor.resizeLeftRightCursor().push()
+
+        # Otherwise, if we clicked on an empty area, start a selection creation drag!
+        bar_hit = self._hit_at_point(pt)
+        if bar_hit is None:
+            row_info = self._row_at_point(pt)
+            if row_info is not None:
+                day_date, t_start, t_end, y_base, rh = row_info
+                graph_x0 = float(LABEL_W)
+                graph_w = float(self.bounds().size.width - LABEL_W - PAD_RIGHT)
+                total_secs = (t_end - t_start).total_seconds()
+                frac = max(0.0, min(1.0, (pt.x - graph_x0) / graph_w))
+                start_dt = t_start + timedelta(seconds=round(frac * total_secs / 60) * 60)
+                
+                self._create_drag = {
+                    "start_dt":   start_dt,
+                    "current_dt": start_dt,
+                    "day_date":   day_date,
+                    "t_start":    t_start,
+                    "t_end":      t_end,
+                    "y_base":     y_base,
+                    "rh":         rh,
+                    "gx0":        graph_x0,
+                    "gw":         graph_w,
+                }
+                NSCursor.crosshairCursor().push()
+                self.setNeedsDisplay_(True)
 
     def mouseDragged_(self, event):
-        if not getattr(self, "_drag", None):
-            return
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
-        d = self._drag
-        # Reverse-map x → datetime, snap to minute
-        total_secs = (d["t_end"] - d["t_start"]).total_seconds()
-        frac = max(0.0, min(1.0, (pt.x - d["gx0"]) / d["gw"]))
-        snapped = d["t_start"] + timedelta(seconds=round(frac * total_secs / 60) * 60)
-        d["current_dt"] = snapped
-        self.setNeedsDisplay_(True)
+        if getattr(self, "_drag", None):
+            d = self._drag
+            total_secs = (d["t_end"] - d["t_start"]).total_seconds()
+            frac = max(0.0, min(1.0, (pt.x - d["gx0"]) / d["gw"]))
+            snapped = d["t_start"] + timedelta(seconds=round(frac * total_secs / 60) * 60)
+            d["current_dt"] = snapped
+            self.setNeedsDisplay_(True)
+        elif getattr(self, "_create_drag", None):
+            d = self._create_drag
+            total_secs = (d["t_end"] - d["t_start"]).total_seconds()
+            frac = max(0.0, min(1.0, (pt.x - d["gx0"]) / d["gw"]))
+            snapped = d["t_start"] + timedelta(seconds=round(frac * total_secs / 60) * 60)
+            d["current_dt"] = snapped
+            self.setNeedsDisplay_(True)
 
     def mouseUp_(self, event):
-        drag = getattr(self, "_drag", None)
-        if not drag:
-            return
-        NSCursor.pop()
-        self._drag = None
+        if getattr(self, "_drag", None):
+            drag = self._drag
+            NSCursor.pop()
+            self._drag = None
 
-        new_dt  = drag["current_dt"]
-        orig_dt = drag["orig_dt"]
-        if new_dt == orig_dt:
-            return   # no change — skip the write
-
-        iid      = f"@{drag['interval_id']}"
-        timew_dt = new_dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
-
-        # Try without :adjust first; only prompt if there's an overlap conflict.
-        try:
-            run_timew_checked("modify", drag["edge"], iid, timew_dt)
-        except RuntimeError as err:
-            # timew returns non-zero when the change would create an overlap.
-            # Ask the user whether to fix the overlap automatically.
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("Overlapping interval")
-            alert.setInformativeText_(
-                "This change overlaps an adjacent interval. "
-                "Adjust the neighbouring interval automatically?"
-            )
-            alert.addButtonWithTitle_("Adjust")   # return value 1000
-            alert.addButtonWithTitle_("Cancel")   # return value 1001
-            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            response = alert.runModal()
-            if response == 1000:   # NSAlertFirstButtonReturn
-                try:
-                    run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
-                except RuntimeError:
-                    pass   # still failed — fall through to redraw/revert
-            else:
-                # User cancelled — redraw restores original from timew data
-                self.setNeedsDisplay_(True)
+            new_dt  = drag["current_dt"]
+            orig_dt = drag["orig_dt"]
+            if new_dt == orig_dt:
                 return
 
-        refresh = getattr(self, "_on_refresh", None)
-        if refresh is not None:
-            refresh()
-        else:
+            iid      = f"@{drag['interval_id']}"
+            timew_dt = new_dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
+
+            try:
+                run_timew_checked("modify", drag["edge"], iid, timew_dt)
+            except RuntimeError as err:
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_("Overlapping interval")
+                alert.setInformativeText_(
+                    "This change overlaps an adjacent interval. "
+                    "Adjust the neighbouring interval automatically?"
+                )
+                alert.addButtonWithTitle_("Adjust")
+                alert.addButtonWithTitle_("Cancel")
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                response = alert.runModal()
+                if response == 1000:
+                    try:
+                        run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
+                    except RuntimeError:
+                        pass
+                else:
+                    self.setNeedsDisplay_(True)
+                    return
+
+            refresh = getattr(self, "_on_refresh", None)
+            if refresh is not None:
+                refresh()
+            else:
+                self.setNeedsDisplay_(True)
+
+        elif getattr(self, "_create_drag", None):
+            d = self._create_drag
+            NSCursor.pop()
+            self._create_drag = None
+            
+            s_dt = min(d["start_dt"], d["current_dt"])
+            e_dt = max(d["start_dt"], d["current_dt"])
+            
+            if (e_dt - s_dt).total_seconds() >= 60:
+                import sys as _sys
+                arete_mod = _sys.modules.get("arete") or _sys.modules.get("__main__")
+                AddPastTaskWindow = getattr(arete_mod, "AddPastTaskWindow", None)
+                if AddPastTaskWindow is not None:
+                    on_refresh = getattr(self, "_on_refresh", None)
+                    ctrl = AddPastTaskWindow.alloc().initWithApp_startDt_endDt_onSave_(
+                        None, s_dt, e_dt, on_refresh
+                    )
+                    self._add_past_ctrl = ctrl  # keep alive
+                    ctrl.show()
             self.setNeedsDisplay_(True)
 
     def resetCursorRects(self):
@@ -900,6 +975,53 @@ class TimelineView(NSView):
                             rect.origin.y + rect.size.height + 2.0),
                     lbl_attrs)
                 break
+
+        # ── create drag overlay ─────────────────────────────────────────────
+        c_drag = getattr(self, "_create_drag", None)
+        if c_drag:
+            total_secs = (c_drag["t_end"] - c_drag["t_start"]).total_seconds()
+            
+            frac_start = (c_drag["start_dt"] - c_drag["t_start"]).total_seconds() / total_secs
+            frac_start = max(0.0, min(1.0, frac_start))
+            x_start = c_drag["gx0"] + frac_start * c_drag["gw"]
+            
+            frac_curr = (c_drag["current_dt"] - c_drag["t_start"]).total_seconds() / total_secs
+            frac_curr = max(0.0, min(1.0, frac_curr))
+            x_curr = c_drag["gx0"] + frac_curr * c_drag["gw"]
+            
+            x0 = min(x_start, x_curr)
+            x1 = max(x_start, x_curr)
+            
+            y = c_drag["y_base"]
+            h = c_drag["rh"]
+            
+            rect = NSRect(NSPoint(x0, y), NSSize(max(2.0, x1 - x0), h))
+            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, 4.0, 4.0)
+            
+            # Semi-transparent light green highlight box (looks like a fresh slot to add a task!)
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.15, 0.68, 0.37, 0.25).set()
+            path.fill()
+            
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.15, 0.68, 0.37, 0.85).set()
+            path.setLineWidth_(1.5)
+            path.stroke()
+            
+            # Draw start/end times floating above
+            lbl_attrs = {
+                NSFontAttributeName: NSFont.boldSystemFontOfSize_(9.0),
+                NSForegroundColorAttributeName: NSColor.labelColor(),
+            }
+            
+            s_str = min(c_drag["start_dt"], c_drag["current_dt"]).strftime("%-H:%M")
+            e_str = max(c_drag["start_dt"], c_drag["current_dt"]).strftime("%-H:%M")
+            lbl_text = f"{s_str} – {e_str}"
+            
+            lbl = NSString.stringWithString_(lbl_text)
+            lbl_sz = lbl.sizeWithAttributes_(lbl_attrs)
+            lbl.drawAtPoint_withAttributes_(
+                NSPoint(x0 + (x1 - x0) / 2.0 - lbl_sz.width / 2.0, y + h + 2.0),
+                lbl_attrs
+            )
 
     @objc.typedSelector(b"v@:@")
     def editInterval_(self, sender):
@@ -1661,7 +1783,7 @@ class NavButtonTarget(NSObject):
         self._cb = cb
         return self
 
-    @objc.signature(b"v@:@")
+    @objc.typedSelector(b"v@:@")
     def fire_(self, sender):
         self._cb()
 
@@ -2691,11 +2813,11 @@ class ReportWindowController(NSObject):
     def init(self):
         return self.initWithWorkdayHours_showEmptyDays_(7.5, True)
 
-    @objc.signature(b"@@:d")
+    @objc.typedSelector(b"@@:d")
     def initWithWorkdayHours_(self, workday_hours):
         return self.initWithWorkdayHours_showEmptyDays_(workday_hours, True)
 
-    @objc.signature(b"@@:dB")
+    @objc.typedSelector(b"@@:dB")
     def initWithWorkdayHours_showEmptyDays_(self, workday_hours, show_empty_days):
         self = objc.super(ReportWindowController, self).init()
         if self is None:
