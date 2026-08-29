@@ -2353,7 +2353,9 @@ def get_intervals_for_date(day_date):
 
 def get_today_intervals():
     """Return today's tracked intervals as list of dicts with local start/end times."""
-    out = run("export", ":day")
+    from datetime import date
+    today_str = date.today().strftime("%Y-%m-%d")
+    out = run("export", today_str)
     if not out:
         return []
     try:
