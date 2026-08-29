@@ -1,4 +1,4 @@
 
 * Integrate with TaskWarrior ?
 * Map task to WBS code ?
-* Add Past Interval
+* Improve splash screen.
