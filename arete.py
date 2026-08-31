@@ -2399,8 +2399,33 @@ def get_today_intervals():
     return intervals
 
 
-def draw_timeline(intervals):
-    """Draw a daily timeline graph representing tracked intervals."""
+class MenubarTimelineView(NSView):
+    """NSView that draws the daily timeline directly in drawRect_ so it is
+    always up-to-date with the current time whenever the menu opens."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(MenubarTimelineView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._intervals = []
+        return self
+
+    @objc.python_method
+    def setIntervals_(self, intervals):
+        self._intervals = intervals
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, dirty_rect):
+        _draw_timeline_in_view(self._intervals, self.bounds())
+
+
+def _draw_timeline_in_view(intervals, bounds):
+    """Draw the daily timeline into the *current* Cocoa graphics context.
+
+    Called both from draw_timeline (which sets up an NSImage context) and
+    from TimelineView.drawRect_ (which uses the live view context so that
+    datetime.now() is evaluated at paint time, not when the image was cached).
+    """
     # Split multi-tag intervals into separate single-tag intervals for distinct lanes
     flat_intervals = []
     for inv in intervals:
@@ -2416,15 +2441,13 @@ def draw_timeline(intervals):
                 })
     intervals = flat_intervals
 
-    width = 320
-    height = 50
-    img = NSImage.alloc().initWithSize_(NSSize(width, height))
-    img.lockFocus()
+    width = bounds.size.width
+    height = bounds.size.height
 
     context = NSGraphicsContext.currentContext()
     context.setShouldAntialias_(True)
 
-    # Calculate scale
+    # Calculate scale — always use the real current time
     now = datetime.now().astimezone()
     if intervals:
         start_hour = min(i["start"].hour for i in intervals)
@@ -2487,7 +2510,6 @@ def draw_timeline(intervals):
         grid_path.stroke()
 
         # Draw hour label
-        from Foundation import NSString
         label = NSString.stringWithString_(f"{h:02d}")
         label_size = label.sizeWithAttributes_(attrs)
         label.drawAtPoint_withAttributes_(
@@ -2560,6 +2582,14 @@ def draw_timeline(intervals):
         ))
         dot_path.fill()
 
+
+def draw_timeline(intervals):
+    """Draw a daily timeline graph into an NSImage and return it."""
+    width = 320
+    height = 50
+    img = NSImage.alloc().initWithSize_(NSSize(width, height))
+    img.lockFocus()
+    _draw_timeline_in_view(intervals, NSRect(NSPoint(0, 0), NSSize(width, height)))
     img.unlockFocus()
     return img
 
@@ -2904,19 +2934,23 @@ class TimeBar(rumps.App):
         if active_tags is None:
             active_tags = get_active_tags()
 
-        # Add timeline graph at the very top of the menu using custom NSImageView
+        # Add timeline graph at the very top of the menu using a live-drawing view
         self._timeline_item = None
+        self._timeline_view = None
         try:
             intervals = get_today_intervals()
-            img = draw_timeline(intervals)
-            
+
             self._timeline_item = rumps.MenuItem("")
-            
-            # Create high-quality custom image view inside the NSMenuItem
-            image_view = NSImageView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(320, 50)))
-            image_view.setImage_(img)
-            self._timeline_item._menuitem.setView_(image_view)
-            
+
+            # TimelineView redraws itself on every drawRect_, so the "now" line
+            # always reflects the real current time when the menu is opened.
+            timeline_view = MenubarTimelineView.alloc().initWithFrame_(
+                NSRect(NSPoint(0, 0), NSSize(320, 50))
+            )
+            timeline_view.setIntervals_(intervals)
+            self._timeline_item._menuitem.setView_(timeline_view)
+            self._timeline_view = timeline_view
+
             self.menu.add(self._timeline_item)
             self.menu.add(rumps.separator)
         except Exception as e:
@@ -3285,15 +3319,13 @@ class TimeBar(rumps.App):
             self._active_tags_cache = active
             self._build_menu(active_tags=active)
         else:
-            # If the menu was not completely rebuilt, just regenerate and refresh the timeline view at the top!
-            if getattr(self, "_timeline_item", None):
+            # Update the interval data on the live TimelineView so any newly
+            # completed intervals appear; the "now" line is always current
+            # because TimelineView calls datetime.now() inside drawRect_.
+            if getattr(self, "_timeline_view", None):
                 try:
                     intervals = get_today_intervals()
-                    img = draw_timeline(intervals)
-                    image_view = self._timeline_item._menuitem.view()
-                    if image_view:
-                        image_view.setImage_(img)
-                        image_view.setNeedsDisplay_(True)
+                    self._timeline_view.setIntervals_(intervals)
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
 
