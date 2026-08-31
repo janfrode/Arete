@@ -3293,6 +3293,7 @@ class TimeBar(rumps.App):
                     image_view = self._timeline_item._menuitem.view()
                     if image_view:
                         image_view.setImage_(img)
+                        image_view.setNeedsDisplay_(True)
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
 
