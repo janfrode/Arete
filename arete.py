@@ -3064,25 +3064,13 @@ class TimeBar(rumps.App):
                     older_menu.add(item)
                 self.menu.add(older_menu)
 
-        self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
-        self.menu.add(rumps.MenuItem("Register past task", callback=self._add_past_task))
-
-        # Build Pin/Unpin tags submenu
-        if all_tags:
-            pin_menu = rumps.MenuItem("Pin / unpin tags")
-            for tag in all_tags:
-                item = rumps.MenuItem(tag, callback=self._toggle_pin)
-                item.tag_name = tag
-                item.state = tag in pinned_set
-                pin_menu.add(item)
-            self.menu.add(pin_menu)
-
-        # "Add additional tag" and "Annotate active task" — only shown when tracking
+        # "Add additional tag", "Annotate active task", "Stop all tracking" — only shown when tracking
         if active_tags:
             recent_tags_set = set(recent_tags)
             add_recent = [t for t in recent_tags if t not in active_tags]
             add_older  = [t for t in all_tags if t not in active_tags and t not in recent_tags_set]
+
+            self.menu.add(rumps.separator)
 
             if add_recent or add_older:
                 add_menu = rumps.MenuItem("Add additional tag")
@@ -3106,16 +3094,38 @@ class TimeBar(rumps.App):
                 self.menu.add(add_menu)
 
             self.menu.add(rumps.MenuItem("Annotate active task", callback=self._annotate_active))
+            self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Stop all tracking", callback=self._stop_all))
 
-        self.menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
+        self.menu.add(rumps.separator)
+        self.menu.add(rumps.MenuItem("Start new tag", callback=self._new_tag))
+        self.menu.add(rumps.MenuItem("Register past task", callback=self._add_past_task))
+
+        # Build Pin/Unpin tags submenu
+        if all_tags:
+            pin_menu = rumps.MenuItem("Pin / unpin tags")
+            for tag in all_tags:
+                item = rumps.MenuItem(tag, callback=self._toggle_pin)
+                item.tag_name = tag
+                item.state = tag in pinned_set
+                pin_menu.add(item)
+            self.menu.add(pin_menu)
+
+        self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Logbook", callback=self._show_reports))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Preferences", callback=self._preferences))
-        self.menu.add(rumps.MenuItem("What's New", callback=self._show_whats_new))
-        self.menu.add(rumps.MenuItem("Check for updates", callback=self._check_for_updates))
-        self.menu.add(rumps.MenuItem("Help", callback=self._show_help))
-        self.menu.add(rumps.MenuItem("Exit Arête", callback=rumps.quit_application))
+
+        help_menu = rumps.MenuItem("Help & Updates")
+        help_menu.add(rumps.MenuItem("What's New", callback=self._show_whats_new))
+        help_menu.add(rumps.MenuItem("Check for updates", callback=self._check_for_updates))
+        help_menu.add(rumps.MenuItem("Refresh tags", callback=self._refresh_tags))
+        help_menu.add(rumps.separator)
+        help_menu.add(rumps.MenuItem("Help", callback=self._show_help))
+        self.menu.add(help_menu)
+
+        self.menu.add(rumps.separator)
+        self.menu.add(rumps.MenuItem("Quit Arête", callback=rumps.quit_application))
 
     # ------------------------------------------------------------------
     # Callbacks
