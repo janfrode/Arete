@@ -1,5 +1,11 @@
 # What's New in Arête
 
+## 1.0.14
+- Make annotation window always on top. 
+- Block for starting new tasks while annotating, since that could lead to wrong id being annotated.
+- New pretty splash screen.
+- Fix timeline refresh when day is empty.
+
 ## 1.0.13
 - **Daily Work-Target Progress Ring** - displays a circular progress ring around the menu bar icon showing your today's tracked hours relative to your daily target. Dynamically updates every 5 seconds. The progress ring is omitted (leaving the standard logo) if your daily work target is set to 0.
 - Remove "target" hours from logbook.
