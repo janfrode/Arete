@@ -996,14 +996,16 @@ class AddPastTaskWindow(NSObject):
         self.chk_adjust.setState_(NSControlStateValueOn)  # default to On for track command
         self.chk_adjust.setFont_(NSFont.systemFontOfSize_(11))
         
+        def _make_spacer():
+            s = NSView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(LABEL_W, 1)))
+            s.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            s.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
+            return s
+
         row_chk = NSStackView.stackViewWithViews_([])
         row_chk.setOrientation_(0)
         row_chk.setSpacing_(8.0)
-        # Empty placeholder spacer to align with the labels
-        spacer = NSView.alloc().initWithFrame_(NSRect(NSPoint(0, 0), NSSize(LABEL_W, 1)))
-        spacer.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        spacer.widthAnchor().constraintEqualToConstant_(float(LABEL_W)).setActive_(True)
-        row_chk.addView_inGravity_(spacer, 1)
+        row_chk.addView_inGravity_(_make_spacer(), 1)
         row_chk.addView_inGravity_(self.chk_adjust, 1)
         stack.addView_inGravity_(row_chk, 1)
 
@@ -1011,11 +1013,11 @@ class AddPastTaskWindow(NSObject):
         self.lbl_error = NSTextField.labelWithString_("")
         self.lbl_error.setTextColor_(NSColor.systemRedColor())
         self.lbl_error.setFont_(NSFont.systemFontOfSize_(11))
-        
+
         row_err = NSStackView.stackViewWithViews_([])
         row_err.setOrientation_(0)
         row_err.setSpacing_(8.0)
-        row_err.addView_inGravity_(spacer, 1)
+        row_err.addView_inGravity_(_make_spacer(), 1)
         row_err.addView_inGravity_(self.lbl_error, 1)
         stack.addView_inGravity_(row_err, 1)
 
@@ -1028,11 +1030,11 @@ class AddPastTaskWindow(NSObject):
         btn_save.setKeyEquivalent_("\r")
         btn_stack.addView_inGravity_(btn_cancel, 3)
         btn_stack.addView_inGravity_(btn_save, 3)
-        
+
         row_btn = NSStackView.stackViewWithViews_([])
         row_btn.setOrientation_(0)
         row_btn.setSpacing_(8.0)
-        row_btn.addView_inGravity_(spacer, 1)
+        row_btn.addView_inGravity_(_make_spacer(), 1)
         row_btn.addView_inGravity_(btn_stack, 1)
         stack.addView_inGravity_(row_btn, 1)
 

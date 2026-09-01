@@ -1548,7 +1548,7 @@ def build_annotations_table(intervals, tag_index, height_above=0.0):
         key=lambda i: i["start"],
     )
     if not annotated:
-        return None, 0.0
+        return None, 0.0, 0.0
 
     FONT_SIZE = 11.0
     ROW_H_A   = 18.0
