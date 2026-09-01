@@ -36,6 +36,7 @@ from AppKit import (
     NSDatePickerElementFlagHourMinute, NSDatePickerElementFlagYearMonthDay,
     NSPopUpButton,
     NSMenuItem,
+    NSGradient, NSShadow,
 )
 from datetime import datetime, timezone, timedelta
 import objc
@@ -2642,6 +2643,49 @@ def stop_tag(tag):
         run("stop")
 
 
+class _SplashCardView(NSView):
+    """Plain white card — rounded corners and drop shadow come from the layer."""
+
+    def drawRect_(self, rect):
+        NSColor.colorWithCalibratedWhite_alpha_(0.97, 1.0).set()
+        NSBezierPath.fillRect_(rect)
+
+    def wantsUpdateLayer(self):
+        return False
+
+
+class _SplashLeftPanel(NSView):
+    """Left teal-gradient panel for the v3a splash."""
+
+    def drawRect_(self, dirty):
+        ctx = NSGraphicsContext.currentContext()
+        ctx.saveGraphicsState()
+
+        bounds = self.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+
+        # Teal gradient — dark teal top → lighter teal bottom (angle 80°)
+        g = NSGradient.alloc().initWithStartingColor_endingColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.34, 0.38, 1.0),
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.50, 0.55, 1.0),
+        )
+        rect_path = NSBezierPath.bezierPathWithRect_(bounds)
+        g.drawInBezierPath_angle_(rect_path, 80.0)
+
+        # Glossy sheen — upper half, semi-transparent white
+        sheen = NSBezierPath.bezierPathWithRect_(
+            NSRect(NSPoint(0, h / 2), NSSize(w, h / 2))
+        )
+        NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.13).set()
+        sheen.fill()
+
+        ctx.restoreGraphicsState()
+
+    def wantsUpdateLayer(self):
+        return False
+
+
 class SplashWindow(NSObject):
     """Borderless splash panel shown briefly at startup, with fade in/out."""
 
@@ -2658,18 +2702,14 @@ class SplashWindow(NSObject):
     def show(self):
         from AppKit import NSAnimationContext
 
-        PAD     = 36
-        ICON    = 120
-        W       = 400
-        NAME_H  = 34
-        VER_H   = 18
-        SUB_H   = 18
-        QUOTE_H = 72
-        GAP1    = 16   # below icon
-        GAP2    = 4    # between name and version
-        GAP3    = 6    # between version and subtitle
-        GAP4    = 18   # between subtitle and quote
-        H = PAD + ICON + GAP1 + NAME_H + GAP2 + VER_H + GAP3 + SUB_H + GAP4 + QUOTE_H + PAD
+        # ── v3a layout constants ─────────────────────────────────────────────
+        W       = 540
+        H       = 240
+        CR      = 20.0
+        PAD     = 28
+        ICON    = 170
+        LEFT_W  = int(W * 0.45)   # teal icon panel
+        RIGHT_W = W - LEFT_W
 
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSRect(NSPoint(0, 0), NSSize(W, H)),
@@ -2684,93 +2724,111 @@ class SplashWindow(NSObject):
         panel.setAlphaValue_(0.0)
         panel.center()
 
-        # ── frosted-glass card ───────────────────────────────────────────────
-        vfx = NSVisualEffectView.alloc().initWithFrame_(
+        # ── outer card view (clips to rounded rect) ──────────────────────────
+        card_view = _SplashCardView.alloc().initWithFrame_(
             NSRect(NSPoint(0, 0), NSSize(W, H))
         )
-        vfx.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-        vfx.setState_(NSVisualEffectStateActive)
-        vfx.setWantsLayer_(True)
-        vfx.layer().setCornerRadius_(20.0)
-        vfx.layer().setMasksToBounds_(True)
-        panel.setContentView_(vfx)
+        card_view.setWantsLayer_(True)
+        card_view.layer().setCornerRadius_(CR)
+        card_view.layer().setMasksToBounds_(True)
+        panel.setContentView_(card_view)
 
-        content_w = W - 2 * PAD
+        # ── right panel: warm white background ───────────────────────────────
+        right = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(LEFT_W, 0), NSSize(RIGHT_W, H))
+        )
+        right.setWantsLayer_(True)
+        right.layer().setBackgroundColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.97, 0.98, 0.98, 1.0).CGColor()
+        )
+        card_view.addSubview_(right)
 
-        # Helper: AppKit y-up from top-down screen cursor
-        def appkit_y(y_screen, h):
-            return H - y_screen - h
+        # ── left panel: teal gradient drawn in a custom view ─────────────────
+        left = _SplashLeftPanel.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(LEFT_W, H))
+        )
+        card_view.addSubview_(left)
 
-        y = PAD   # top-down cursor
-
-        # ── icon ────────────────────────────────────────────────────────────
+        # ── icon centred in left panel ────────────────────────────────────────
         icon_path = get_icon_path()
         if icon_path:
             logo_img = NSImage.alloc().initWithContentsOfFile_(icon_path)
             if logo_img:
                 logo_img.setSize_(NSSize(ICON, ICON))
+                ix = (LEFT_W - ICON) / 2
+                iy = (H - ICON) / 2
                 iv = NSImageView.alloc().initWithFrame_(
-                    NSRect(NSPoint((W - ICON) / 2, appkit_y(y, ICON)), NSSize(ICON, ICON))
+                    NSRect(NSPoint(ix, iy), NSSize(ICON, ICON))
                 )
                 iv.setImage_(logo_img)
                 iv.setImageScaling_(3)
-                vfx.addSubview_(iv)
-        y += ICON + GAP1
+                left.addSubview_(iv)
 
-        # ── app name ─────────────────────────────────────────────────────────
+        # ── text column in right panel ────────────────────────────────────────
+        # y cursor runs top-down; convert to AppKit y-up with appkit_y()
+        def appkit_y(y_top, h):
+            return H - y_top - h
+
+        tx  = PAD
+        tw  = RIGHT_W - 2 * PAD
+        y   = PAD   # top-down
+
+        # App name
         lbl_name = NSTextField.labelWithString_("Ar\u00eate")
         lbl_name.setFont_(NSFont.boldSystemFontOfSize_(26))
-        lbl_name.setAlignment_(1)   # centre
-        lbl_name.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, NAME_H)), NSSize(content_w, NAME_H)))
-        vfx.addSubview_(lbl_name)
-        y += NAME_H + GAP2
+        lbl_name.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.08, 1.0))
+        lbl_name.setAlignment_(0)   # left
+        lbl_name.setFrame_(NSRect(NSPoint(LEFT_W + tx, appkit_y(y, 34)), NSSize(tw, 34)))
+        card_view.addSubview_(lbl_name)
+        y += 34 + 6
 
-        # ── version ──────────────────────────────────────────────────────────
+        # Version
         lbl_ver = NSTextField.labelWithString_(f"Version {VERSION}")
         lbl_ver.setFont_(NSFont.systemFontOfSize_(12))
-        lbl_ver.setTextColor_(NSColor.secondaryLabelColor())
-        lbl_ver.setAlignment_(1)
-        lbl_ver.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, VER_H)), NSSize(content_w, VER_H)))
-        vfx.addSubview_(lbl_ver)
-        y += VER_H + GAP3
+        lbl_ver.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.45, 1.0))
+        lbl_ver.setAlignment_(0)
+        lbl_ver.setFrame_(NSRect(NSPoint(LEFT_W + tx, appkit_y(y, 18)), NSSize(tw, 18)))
+        card_view.addSubview_(lbl_ver)
+        y += 18 + 8
 
-        # ── "Starting…" ───────────────────────────────────────────────────────
+        # "Starting…" in teal accent
         lbl_sub = NSTextField.labelWithString_("Starting\u2026")
-        lbl_sub.setFont_(NSFont.systemFontOfSize_(13))
-        lbl_sub.setTextColor_(NSColor.tertiaryLabelColor())
-        lbl_sub.setAlignment_(1)
-        lbl_sub.setFrame_(NSRect(NSPoint(PAD, appkit_y(y, SUB_H)), NSSize(content_w, SUB_H)))
-        vfx.addSubview_(lbl_sub)
-        y += SUB_H + GAP4
+        lbl_sub.setFont_(NSFont.systemFontOfSize_(12))
+        lbl_sub.setTextColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.50, 0.55, 1.0)
+        )
+        lbl_sub.setAlignment_(0)
+        lbl_sub.setFrame_(NSRect(NSPoint(LEFT_W + tx, appkit_y(y, 18)), NSSize(tw, 18)))
+        card_view.addSubview_(lbl_sub)
+        y += 18 + 12
 
-        # ── thin separator ───────────────────────────────────────────────────
-        sep_h = 1
+        # Thin separator
         sep = NSBox.alloc().initWithFrame_(
-            NSRect(NSPoint(PAD, appkit_y(y, sep_h)), NSSize(content_w, sep_h))
+            NSRect(NSPoint(LEFT_W + tx, appkit_y(y, 1)), NSSize(tw, 1))
         )
         sep.setBoxType_(2)   # NSBoxSeparator
-        vfx.addSubview_(sep)
-        y += sep_h + 10
+        card_view.addSubview_(sep)
+        y += 1 + 8
 
-        # ── quote ────────────────────────────────────────────────────────────
-        italic_11 = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(
-            NSFont.systemFontOfSize_(11), 1
+        # Quote
+        italic_10 = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(
+            NSFont.systemFontOfSize_(10), 1   # NSItalicFontMask
         )
-        q_h = QUOTE_H - 10   # leave some breathing room
+        q_h = H - y - PAD
         tf = NSTextField.alloc().initWithFrame_(
-            NSRect(NSPoint(PAD, appkit_y(y, q_h)), NSSize(content_w, q_h))
+            NSRect(NSPoint(LEFT_W + tx, appkit_y(y, q_h)), NSSize(tw, q_h))
         )
         tf.setStringValue_(self.QUOTE)
-        tf.setFont_(italic_11)
-        tf.setTextColor_(NSColor.secondaryLabelColor())
+        tf.setFont_(italic_10)
+        tf.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.48, 1.0))
         tf.setBezeled_(False)
         tf.setDrawsBackground_(False)
         tf.setEditable_(False)
         tf.setSelectable_(False)
-        tf.setAlignment_(1)
+        tf.setAlignment_(0)   # left
         tf.cell().setWraps_(True)
         tf.setMaximumNumberOfLines_(0)
-        vfx.addSubview_(tf)
+        card_view.addSubview_(tf)
 
         self._panel = panel
         panel.makeKeyAndOrderFront_(None)
