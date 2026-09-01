@@ -54,7 +54,9 @@ OPTIONS = {
     },
     # rumps is not auto-detected by py2app's import scanner; list it explicitly.
     # pyobjc (AppKit, Foundation, objc) is picked up automatically via imports.
-    'packages': ['rumps'],
+    # encodings.idna is needed by urllib/http.client for hostname resolution;
+    # py2app's stdlib pruning drops it unless listed here.
+    'packages': ['rumps', 'encodings'],
     'iconfile': 'Arete.icns',
 }
 
