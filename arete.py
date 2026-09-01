@@ -1691,6 +1691,7 @@ class AnnotateWindow(NSObject):
 
         window.setContentView_(stack)
         self.window = window
+        window.setLevel_(3)   # NSFloatingWindowLevel — always on top
         window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         window.makeFirstResponder_(self.txt_annotation)
@@ -2686,6 +2687,17 @@ class _SplashLeftPanel(NSView):
         return False
 
 
+class _SplashRightPanel(NSView):
+    """Right warm-white panel for the splash screen (avoids CGColor bridging)."""
+
+    def drawRect_(self, dirty):
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.97, 0.98, 0.98, 1.0).set()
+        NSBezierPath.fillRect_(self.bounds())
+
+    def wantsUpdateLayer(self):
+        return False
+
+
 class SplashWindow(NSObject):
     """Borderless splash panel shown briefly at startup, with fade in/out."""
 
@@ -2734,12 +2746,8 @@ class SplashWindow(NSObject):
         panel.setContentView_(card_view)
 
         # ── right panel: warm white background ───────────────────────────────
-        right = NSView.alloc().initWithFrame_(
+        right = _SplashRightPanel.alloc().initWithFrame_(
             NSRect(NSPoint(LEFT_W, 0), NSSize(RIGHT_W, H))
-        )
-        right.setWantsLayer_(True)
-        right.layer().setBackgroundColor_(
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.97, 0.98, 0.98, 1.0).CGColor()
         )
         card_view.addSubview_(right)
 
@@ -3131,7 +3139,18 @@ class TimeBar(rumps.App):
     # Callbacks
     # ------------------------------------------------------------------
 
+    def _annotate_controller_active(self):
+        """Return True (and bring the annotation window forward) if it is open."""
+        ctrl = getattr(self, "_annotate_controller", None)
+        if ctrl is not None:
+            ctrl.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            return True
+        return False
+
     def _new_tag(self, _):
+        if self._annotate_controller_active():
+            return
         if getattr(self, "_new_tag_controller", None):
             self._new_tag_controller.window.makeKeyAndOrderFront_(None)
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -3140,6 +3159,8 @@ class TimeBar(rumps.App):
         self._new_tag_controller.show()
 
     def _add_past_task(self, _):
+        if self._annotate_controller_active():
+            return
         if getattr(self, "_add_past_controller", None):
             self._add_past_controller.window.makeKeyAndOrderFront_(None)
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -3148,6 +3169,8 @@ class TimeBar(rumps.App):
         self._add_past_controller.show()
 
     def _toggle_tag(self, sender):
+        if self._annotate_controller_active():
+            return
         tag = getattr(sender, "tag_name", sender.title)
         if sender.state:
             # Tag is active — stop it
@@ -3169,11 +3192,15 @@ class TimeBar(rumps.App):
 
     def _add_tag_clicked(self, sender):
         """Add the selected tag to the currently active set."""
+        if self._annotate_controller_active():
+            return
         tag = getattr(sender, "tag_name", sender.title)
         start_tag(tag, add_to_active=True)
         self._update_state()
 
     def _toggle_tag_by_name(self, tag):
+        if self._annotate_controller_active():
+            return
         active = get_active_tags()
         if tag in active:
             active.discard(tag)
