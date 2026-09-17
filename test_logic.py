@@ -560,3 +560,121 @@ class TestLoadSaveConfig:
             arete.save_config({"key": "value"})  # should not raise
         finally:
             arete.CONFIG_PATH = original_path
+
+
+class TestFormatHHMM:
+    def test_zero(self):
+        assert arete._format_hhmm(0) == "0:00"
+
+    def test_minutes_only(self):
+        assert arete._format_hhmm(420) == "0:07"
+
+    def test_hours_and_minutes(self):
+        assert arete._format_hhmm(3660) == "1:01"
+
+    def test_exactly_one_hour(self):
+        assert arete._format_hhmm(3600) == "1:00"
+
+    def test_large_value(self):
+        assert arete._format_hhmm(9000) == "2:30"
+
+
+class TestSessionStartForTag:
+    """Tests for _session_start_for_tag using timezone-aware datetimes."""
+
+    TZ = timezone.utc
+
+    def _iv(self, start_min, end_min, tags):
+        """Build an interval dict with start/end as minutes-offset from midnight."""
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        return {
+            "start": base + timedelta(minutes=start_min),
+            "end": base + timedelta(minutes=end_min),
+            "tags": tags,
+        }
+
+    def test_empty_intervals_returns_none(self):
+        assert arete._session_start_for_tag("work", []) is None
+
+    def test_tag_not_in_last_interval_returns_none(self):
+        ivs = [self._iv(0, 30, ["other"])]
+        assert arete._session_start_for_tag("work", ivs) is None
+
+    def test_single_interval_returns_its_start(self):
+        ivs = [self._iv(0, 30, ["work"])]
+        result = arete._session_start_for_tag("work", ivs)
+        assert result == ivs[0]["start"]
+
+    def test_two_adjacent_intervals_both_with_tag(self):
+        # work 0-30, work 30-60 — chain extends back to 0
+        ivs = [self._iv(0, 30, ["work"]), self._iv(30, 60, ["work"])]
+        result = arete._session_start_for_tag("work", ivs)
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        assert result == base + timedelta(minutes=0)
+
+    def test_gap_breaks_chain(self):
+        # work 0-30, gap, work 40-60 — session starts at 40
+        ivs = [self._iv(0, 30, ["work"]), self._iv(40, 60, ["work"])]
+        result = arete._session_start_for_tag("work", ivs)
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        assert result == base + timedelta(minutes=40)
+
+    def test_previous_interval_missing_tag_breaks_chain(self):
+        # other 0-30 (adjacent), work 30-60 — "meeting" not in first, so session = 30
+        ivs = [self._iv(0, 30, ["other"]), self._iv(30, 60, ["work"])]
+        result = arete._session_start_for_tag("work", ivs)
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        assert result == base + timedelta(minutes=30)
+
+    def test_multi_tag_original_extends_further(self):
+        # Scenario from the plan: work 0-30, [meeting+work] 30-37
+        # work chain reaches back to 0; meeting chain only to 30
+        ivs = [
+            self._iv(0, 30, ["work"]),
+            self._iv(30, 37, ["meeting", "work"]),
+        ]
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        assert arete._session_start_for_tag("work", ivs) == base + timedelta(minutes=0)
+        assert arete._session_start_for_tag("meeting", ivs) == base + timedelta(minutes=30)
+
+    def test_adjacency_tolerance(self):
+        # 1-second gap between intervals should still be treated as adjacent
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        ivs = [
+            {"start": base, "end": base + timedelta(minutes=30, seconds=1), "tags": ["work"]},
+            {"start": base + timedelta(minutes=30, seconds=2), "end": base + timedelta(hours=1), "tags": ["work"]},
+        ]
+        result = arete._session_start_for_tag("work", ivs)
+        assert result == base
+
+
+class TestTagDurationToday:
+    TZ = timezone.utc
+
+    def _iv(self, start_min, end_min, tags):
+        base = datetime(2024, 1, 1, tzinfo=self.TZ)
+        return {
+            "start": base + timedelta(minutes=start_min),
+            "end": base + timedelta(minutes=end_min),
+            "tags": tags,
+        }
+
+    def test_no_intervals_returns_zero(self):
+        assert arete._tag_duration_today("work", []) == 0
+
+    def test_tag_not_present_returns_zero(self):
+        ivs = [self._iv(0, 30, ["other"])]
+        assert arete._tag_duration_today("work", ivs) == 0
+
+    def test_single_interval(self):
+        ivs = [self._iv(0, 30, ["work"])]
+        assert arete._tag_duration_today("work", ivs) == 30 * 60
+
+    def test_multiple_intervals_summed(self):
+        ivs = [self._iv(0, 30, ["work"]), self._iv(60, 90, ["work"])]
+        assert arete._tag_duration_today("work", ivs) == 60 * 60
+
+    def test_mixed_tags_only_counts_target(self):
+        ivs = [self._iv(0, 30, ["work"]), self._iv(30, 60, ["meeting", "work"])]
+        assert arete._tag_duration_today("work", ivs) == 60 * 60
+        assert arete._tag_duration_today("meeting", ivs) == 30 * 60

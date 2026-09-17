@@ -657,7 +657,14 @@ class TimelineView(NSView):
         return None
 
     def _edge_hit(self, pt):
-        """Return (entry, "start"|"end") if pt is near a bar edge, else None."""
+        """Return (entry, "start"|"end") if pt is near a bar edge, else None.
+
+        For multi-tag intervals all lanes share the same interval_id and the
+        same x-extent.  We therefore test the x-distance against every bar and
+        return the first candidate whose *row* (any lane of that interval_id)
+        vertically contains the cursor.
+        """
+        # First pass: find candidates by x-proximity regardless of lane.
         for entry in self._hit_rects:
             rect = entry[0]
             interval_id = entry[5]
@@ -665,15 +672,20 @@ class TimelineView(NSView):
                 continue
             bar_left  = rect.origin.x
             bar_right = rect.origin.x + rect.size.width
-            bar_top   = rect.origin.y + rect.size.height
-            bar_bot   = rect.origin.y
-            # Must be within the bar's vertical extent
-            if not (bar_bot <= pt.y <= bar_top):
-                continue
             if abs(pt.x - bar_left) <= self._EDGE_HIT_PX:
-                return entry, "start"
-            if abs(pt.x - bar_right) <= self._EDGE_HIT_PX:
-                return entry, "end"
+                edge = "start"
+            elif abs(pt.x - bar_right) <= self._EDGE_HIT_PX:
+                edge = "end"
+            else:
+                continue
+            # Accept if the cursor is within any lane that belongs to this interval.
+            for sibling in self._hit_rects:
+                if sibling[5] != interval_id:
+                    continue
+                s_bot = sibling[0].origin.y
+                s_top = s_bot + sibling[0].size.height
+                if s_bot <= pt.y <= s_top:
+                    return entry, edge
         return None
 
     def mouseMoved_(self, event):
@@ -719,6 +731,7 @@ class TimelineView(NSView):
                 "interval_id": interval_id,
                 "orig_dt":     orig_dt,
                 "current_dt":  orig_dt,
+                "other_dt":    end_dt if edge == "start" else start_dt,
                 "rect":        rect,
                 "tag":         tag,
                 "gx0":         gx0,
@@ -778,35 +791,57 @@ class TimelineView(NSView):
             NSCursor.pop()
             self._drag = None
 
-            new_dt  = drag["current_dt"]
-            orig_dt = drag["orig_dt"]
+            new_dt   = drag["current_dt"]
+            orig_dt  = drag["orig_dt"]
+            other_dt = drag["other_dt"]  # the opposite end of the interval
+
+            # Clamp so the dragged edge can never cross the opposite end.
+            if drag["edge"] == "start":
+                if other_dt and new_dt >= other_dt:
+                    new_dt = other_dt - timedelta(minutes=1)
+            else:
+                if other_dt and new_dt <= other_dt:
+                    new_dt = other_dt + timedelta(minutes=1)
+
             if new_dt == orig_dt:
                 return
 
             iid      = f"@{drag['interval_id']}"
             timew_dt = new_dt.astimezone().strftime("%Y%m%dT%H%M%S%z")
 
+            # Determine whether this is an expansion (moving outward) or a
+            # shrink (moving inward).  Only expansions can overlap neighbours.
+            is_expansion = (
+                (drag["edge"] == "start" and new_dt < orig_dt) or
+                (drag["edge"] == "end"   and new_dt > orig_dt)
+            )
+
             try:
                 run_timew_checked("modify", drag["edge"], iid, timew_dt)
-            except RuntimeError as err:
-                alert = NSAlert.alloc().init()
-                alert.setMessageText_("Overlapping interval")
-                alert.setInformativeText_(
-                    "This change overlaps an adjacent interval. "
-                    "Adjust the neighbouring interval automatically?"
-                )
-                alert.addButtonWithTitle_("Adjust")
-                alert.addButtonWithTitle_("Cancel")
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-                response = alert.runModal()
-                if response == 1000:
-                    try:
-                        run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
-                    except RuntimeError:
-                        pass
+            except RuntimeError:
+                if not is_expansion:
+                    # Shrinking should never produce a neighbour overlap;
+                    # something else went wrong — just refresh silently.
+                    pass
                 else:
-                    self.setNeedsDisplay_(True)
-                    return
+                    alert = NSAlert.alloc().init()
+                    alert.setMessageText_("Overlapping interval")
+                    alert.setInformativeText_(
+                        "This change overlaps an adjacent interval. "
+                        "Adjust the neighbouring interval automatically?"
+                    )
+                    alert.addButtonWithTitle_("Adjust")
+                    alert.addButtonWithTitle_("Cancel")
+                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                    response = alert.runModal()
+                    if response == 1000:
+                        try:
+                            run_timew_checked("modify", drag["edge"], iid, timew_dt, ":adjust")
+                        except RuntimeError:
+                            pass
+                    else:
+                        self.setNeedsDisplay_(True)
+                        return
 
             refresh = getattr(self, "_on_refresh", None)
             if refresh is not None:
@@ -873,6 +908,36 @@ class TimelineView(NSView):
         edit_item.setTarget_(self)
         edit_item.setEnabled_(hit)
         menu.addItem_(edit_item)
+
+        # ── "Remove tag" submenu ─────────────────────────────────────────────
+        remove_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Remove tag", None, ""
+        )
+        remove_submenu = NSMenu.alloc().initWithTitle_("Remove tag")
+        interval_tags = []
+        if hit:
+            interval_id = self._right_click_hit[5]
+            if interval_id is not None:
+                try:
+                    out = run_timew("export", f"@{interval_id}")
+                    if out:
+                        data = json.loads(out)
+                        if data:
+                            interval_tags = data[0].get("tags") or []
+                except Exception:
+                    pass
+        for tag_name in interval_tags:
+            tag_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                tag_name, "removeTag:", ""
+            )
+            tag_item.setTarget_(self)
+            tag_item.setRepresentedObject_(
+                (self._right_click_hit[5], tag_name)
+            )
+            remove_submenu.addItem_(tag_item)
+        remove_parent.setSubmenu_(remove_submenu)
+        remove_parent.setEnabled_(hit and bool(interval_tags))
+        menu.addItem_(remove_parent)
 
         sep = NSMenuItem.separatorItem()
         menu.addItem_(sep)
@@ -942,19 +1007,18 @@ class TimelineView(NSView):
         # ── drag overlay ────────────────────────────────────────────────────
         drag = getattr(self, "_drag", None)
         if drag:
-            # Find the matching hit-rect to get bar geometry for overlay
             iid = drag["interval_id"]
+            d = drag
+            total_secs = (d["t_end"] - d["t_start"]).total_seconds()
+            frac = (d["current_dt"] - d["t_start"]).total_seconds() / total_secs
+            frac = max(0.0, min(1.0, frac))
+            new_x = d["gx0"] + frac * d["gw"]
+            # Draw a drag line across every lane that belongs to this interval.
+            top_y = None
             for entry in hits:
                 if entry[5] != iid:
                     continue
-                rect, tag = entry[0], entry[1]
-                # Recompute x for the dragged edge
-                d = drag
-                total_secs = (d["t_end"] - d["t_start"]).total_seconds()
-                frac = (d["current_dt"] - d["t_start"]).total_seconds() / total_secs
-                frac = max(0.0, min(1.0, frac))
-                new_x = d["gx0"] + frac * d["gw"]
-                # Draw a vertical line at the drag position
+                rect = entry[0]
                 line = NSBezierPath.bezierPath()
                 line.setLineWidth_(2.0)
                 line.moveToPoint_(NSPoint(new_x, rect.origin.y))
@@ -962,7 +1026,11 @@ class TimelineView(NSView):
                 NSColor.colorWithCalibratedRed_green_blue_alpha_(
                     0.0, 0.45, 0.9, 0.9).set()
                 line.stroke()
-                # Time label above the line
+                lane_top = rect.origin.y + rect.size.height
+                if top_y is None or lane_top > top_y:
+                    top_y = lane_top
+            # Time label once, above the topmost lane.
+            if top_y is not None:
                 lbl_attrs = {
                     NSFontAttributeName: NSFont.boldSystemFontOfSize_(9.0),
                     NSForegroundColorAttributeName: NSColor.labelColor(),
@@ -971,10 +1039,8 @@ class TimelineView(NSView):
                     d["current_dt"].strftime("%-H:%M"))
                 lbl_sz = lbl.sizeWithAttributes_(lbl_attrs)
                 lbl.drawAtPoint_withAttributes_(
-                    NSPoint(new_x - lbl_sz.width / 2.0,
-                            rect.origin.y + rect.size.height + 2.0),
+                    NSPoint(new_x - lbl_sz.width / 2.0, top_y + 2.0),
                     lbl_attrs)
-                break
 
         # ── create drag overlay ─────────────────────────────────────────────
         c_drag = getattr(self, "_create_drag", None)
@@ -1067,6 +1133,38 @@ class TimelineView(NSView):
         )
         self._edit_ctrl = ctrl  # keep alive
         ctrl.show()
+
+    @objc.typedSelector(b"v@:@")
+    def removeTag_(self, sender):
+        represented = sender.representedObject()
+        if represented is None:
+            return
+        interval_id, tag_name = represented
+        if interval_id is None or not tag_name:
+            return
+        # If this is the last tag, delete the interval entirely instead of
+        # leaving a tag-less record.
+        try:
+            out = run_timew("export", f"@{interval_id}")
+            current_tags = []
+            if out:
+                data = json.loads(out)
+                if data:
+                    current_tags = data[0].get("tags") or []
+        except Exception:
+            current_tags = [tag_name]
+        try:
+            if len(current_tags) <= 1:
+                run_timew_checked("delete", f"@{interval_id}")
+            else:
+                run_timew_checked("untag", f"@{interval_id}", tag_name)
+        except RuntimeError:
+            return
+        refresh = getattr(self, "_on_refresh", None)
+        if refresh is not None:
+            refresh()
+        else:
+            self.setNeedsDisplay_(True)
 
     @objc.typedSelector(b"v@:@")
     def showRawData_(self, sender):
