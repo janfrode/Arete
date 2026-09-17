@@ -431,6 +431,15 @@ class PreferencesWindow(NSObject):
         )
         stack.addView_inGravity_(self.chk_prompt_stop, 1)
 
+        self.chk_show_durations = NSButton.buttonWithTitle_target_action_(
+            "Show cumulative time in tag menu", self, None
+        )
+        self.chk_show_durations.setButtonType_(3)
+        self.chk_show_durations.setState_(
+            NSControlStateValueOn if self.app._config.get("show_cumulative_time", True) else NSControlStateValueOff
+        )
+        stack.addView_inGravity_(self.chk_show_durations, 1)
+
         # Form rows: label (fixed 200 px wide, right-aligned) + field
         LABEL_W = 210
 
@@ -528,6 +537,10 @@ class PreferencesWindow(NSObject):
 
         self.app._config["prompt_on_stop"] = (
             self.chk_prompt_stop.state() == NSControlStateValueOn
+        )
+
+        self.app._config["show_cumulative_time"] = (
+            self.chk_show_durations.state() == NSControlStateValueOn
         )
 
         save_config(self.app._config)
@@ -2655,6 +2668,38 @@ def _format_hhmm(seconds):
     return f"{h}:{m:02d}"
 
 
+def _set_item_title(item, tag, time_suffix=None):
+    """Set a menu item's title with an optional greyed time suffix.
+
+    If *time_suffix* is given the tag name is rendered in labelColor and the
+    suffix in secondaryLabelColor.  Falls back to a plain title on any error.
+    """
+    if not time_suffix:
+        item.title = tag
+        return
+    try:
+        from AppKit import NSAttributedString as _NAS
+        from Foundation import NSMutableAttributedString as _NMAS
+        attrs_tag  = {NSForegroundColorAttributeName: NSColor.labelColor()}
+        attrs_time = {NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
+        part1 = _NAS.alloc().initWithString_attributes_(tag, attrs_tag)
+        part2 = _NAS.alloc().initWithString_attributes_(f"  {time_suffix}", attrs_time)
+        combined = _NMAS.alloc().initWithAttributedString_(part1)
+        combined.appendAttributedString_(part2)
+        item._menuitem.setAttributedTitle_(combined)
+    except Exception:
+        item.title = f"{tag}  {time_suffix}"
+
+
+def _tag_duration_today(tag, intervals):
+    """Return total seconds tracked for *tag* across all of today's intervals."""
+    return sum(
+        (iv["end"] - iv["start"]).total_seconds()
+        for iv in intervals
+        if tag in iv["tags"]
+    )
+
+
 def get_active_tags():
     """Return set of tags currently being tracked (empty if not tracking)."""
     active_tags, _ = get_active_tracking_info()
@@ -3471,10 +3516,12 @@ class TimeBar(rumps.App):
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
 
+        show_cumulative = self._config.get("show_cumulative_time", True)
         now = datetime.now().astimezone()
         for tag, item in self._tag_items.items():
             item.state = tag in active
             if tag in active:
+                # Always show the current session time for active tags.
                 try:
                     session_start = _session_start_for_tag(tag, intervals)
                     if session_start is not None:
@@ -3482,14 +3529,36 @@ class TimeBar(rumps.App):
                         tag_duration = _format_hhmm(secs)
                     else:
                         tag_duration = duration
+                        secs = None
                 except Exception:
                     tag_duration = duration
+                    secs = None
                 if tag_duration:
-                    item.title = f"{tag} ({tag_duration})"
+                    if show_cumulative:
+                        try:
+                            secs_today = _tag_duration_today(tag, intervals)
+                            if secs is not None and secs_today > secs + 60:
+                                suffix = f"({tag_duration} / {_format_hhmm(secs_today)})"
+                            else:
+                                suffix = f"({tag_duration})"
+                        except Exception:
+                            suffix = f"({tag_duration})"
+                    else:
+                        suffix = f"({tag_duration})"
+                    _set_item_title(item, tag, suffix)
+                else:
+                    _set_item_title(item, tag)
+            else:
+                # Inactive tag: show greyed cumulative today-total if tracked today.
+                if show_cumulative:
+                    try:
+                        secs_today = _tag_duration_today(tag, intervals)
+                        suffix = _format_hhmm(secs_today) if secs_today >= 60 else None
+                    except Exception:
+                        suffix = None
+                    _set_item_title(item, tag, suffix)
                 else:
                     item.title = tag
-            else:
-                item.title = tag
 
         workday_hours = self._config.get("workday_hours", 7.5)
 
@@ -3550,9 +3619,63 @@ class TimeBar(rumps.App):
                 self.template = True
 
 
+def _unlock_bundle_path():
+    """Rename the running .app bundle and re-exec so Finder can overwrite it.
+
+    Launch Services tracks running apps by bundle path, not by inode.  Simply
+    renaming the directory is not enough — the process must re-exec itself from
+    the new path so that macOS no longer associates any running process with
+    /Applications/Arete.app.  Only then will a Finder drag-copy from the DMG
+    succeed without the "item is in use" error.
+
+    Strategy:
+      1. If we are already running from *.old.app we are the re-exec'd copy:
+         clean up any other stale .old bundles and continue normally.
+      2. Otherwise rename Arete.app → Arete.old.app and re-exec the binary
+         from its new location (os.execv — replaces the process in-place,
+         same PID environment, no orphan processes).
+    """
+    exe = os.path.abspath(sys.argv[0])
+    if ".app/Contents/MacOS" not in exe:
+        return  # dev / script run — nothing to do
+
+    bundle = exe.split(".app/Contents/MacOS")[0] + ".app"
+
+    # Only act on the installed copy in /Applications
+    if not bundle.startswith("/Applications/"):
+        return
+
+    # --- Case 1: already running from the renamed bundle ---
+    if bundle.endswith(".old.app"):
+        parent = os.path.dirname(bundle)
+        try:
+            for entry in os.listdir(parent):
+                if entry.startswith("Arete.") and entry.endswith(".old.app"):
+                    stale = os.path.join(parent, entry)
+                    if stale != bundle:
+                        shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            pass
+        return
+
+    # --- Case 2: first launch from canonical path — rename then re-exec ---
+    old_bundle = bundle[:-4] + ".old.app"  # /Applications/Arete.old.app
+    try:
+        os.rename(bundle, old_bundle)
+    except OSError:
+        return  # not writable — give up silently, drag-install will fail as before
+
+    # Build the new executable path and re-exec into it
+    suffix = exe[len(bundle):]          # e.g. /Contents/MacOS/Arete
+    new_exe = old_bundle + suffix
+    os.execv(new_exe, [new_exe] + sys.argv[1:])
+    # execv replaces the process image; nothing below this line runs
+
+
 if __name__ == "__main__":
     # Prevent the Python rocket icon from showing in the Dock when running directly
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-    
+
+    _unlock_bundle_path()
     TimeBar().run()
