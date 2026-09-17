@@ -1,5 +1,9 @@
 # What's New in Arête
 
+## 1.0.16
+- Show independent time since tag was started when tracking multiple tags.
+- Configurable display of cumulative time today per tag in main view.
+
 ## 1.0.14
 - Make annotation window always on top. 
 - Block for starting new tasks while annotating, since that could lead to wrong id being annotated.
