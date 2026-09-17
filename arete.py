@@ -2616,6 +2616,45 @@ def get_active_tracking_info():
     return active_tags, duration
 
 
+def _session_start_for_tag(tag, intervals):
+    """Return the datetime at which the current continuous session for *tag* began.
+
+    Walks backwards through *intervals* (a list of dicts with 'start', 'end',
+    'tags' keys as returned by get_today_intervals()) from the last (open)
+    interval, extending the chain as long as consecutive intervals are
+    immediately adjacent (end == next start, within 2 seconds) and both
+    contain *tag*.
+
+    Returns None if *tag* is not present in the last interval (i.e. not
+    currently active).
+    """
+    if not intervals:
+        return None
+    sorted_ivs = sorted(intervals, key=lambda iv: iv["start"])
+    # The last interval is the open/active one.
+    if tag not in sorted_ivs[-1]["tags"]:
+        return None
+    session_start = sorted_ivs[-1]["start"]
+    for i in range(len(sorted_ivs) - 2, -1, -1):
+        prev = sorted_ivs[i]
+        curr = sorted_ivs[i + 1]
+        gap = abs((curr["start"] - prev["end"]).total_seconds())
+        if gap > 2:
+            break
+        if tag not in prev["tags"]:
+            break
+        session_start = prev["start"]
+    return session_start
+
+
+def _format_hhmm(seconds):
+    """Format a duration in seconds as 'H:MM' (no zero-padding on hours)."""
+    total_minutes = int(seconds) // 60
+    h = total_minutes // 60
+    m = total_minutes % 60
+    return f"{h}:{m:02d}"
+
+
 def get_active_tags():
     """Return set of tags currently being tracked (empty if not tracking)."""
     active_tags, _ = get_active_tracking_info()
@@ -3411,7 +3450,14 @@ class TimeBar(rumps.App):
 
     def _update_state(self):
         active, duration = get_active_tracking_info()
-        
+
+        # Fetch today's intervals once; reused for tag labels, timeline, and
+        # workday progress to avoid redundant subprocess calls.
+        try:
+            intervals = get_today_intervals()
+        except Exception:
+            intervals = []
+
         if active != getattr(self, "_active_tags_cache", None):
             self._active_tags_cache = active
             self._build_menu(active_tags=active)
@@ -3421,25 +3467,36 @@ class TimeBar(rumps.App):
             # because TimelineView calls datetime.now() inside drawRect_.
             if getattr(self, "_timeline_view", None):
                 try:
-                    intervals = get_today_intervals()
                     self._timeline_view.setIntervals_(intervals)
                 except Exception as e:
                     print(f"Error updating timeline: {e}")
 
+        now = datetime.now().astimezone()
         for tag, item in self._tag_items.items():
             item.state = tag in active
-            if tag in active and duration:
-                item.title = f"{tag} ({duration})"
+            if tag in active:
+                try:
+                    session_start = _session_start_for_tag(tag, intervals)
+                    if session_start is not None:
+                        secs = (now - session_start).total_seconds()
+                        tag_duration = _format_hhmm(secs)
+                    else:
+                        tag_duration = duration
+                except Exception:
+                    tag_duration = duration
+                if tag_duration:
+                    item.title = f"{tag} ({tag_duration})"
+                else:
+                    item.title = tag
             else:
                 item.title = tag
 
         workday_hours = self._config.get("workday_hours", 7.5)
-        
+
         # Calculate dynamic progress if workday target is set
         progress = None
         if workday_hours > 0.0:
             try:
-                intervals = get_today_intervals()
                 total_seconds = sum((inv["end"] - inv["start"]).total_seconds() for inv in intervals)
                 progress = total_seconds / (workday_hours * 3600.0)
             except Exception as e:
