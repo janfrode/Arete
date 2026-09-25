@@ -38,7 +38,7 @@ from AppKit import (
     NSMenuItem,
     NSGradient, NSShadow,
 )
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 import objc
 
 
@@ -248,6 +248,21 @@ class NotificationObserver(NSObject):
     def screenUnlocked_(self, notification):
         self.app.handle_screen_unlocked()
 
+
+
+class MenuDelegate(NSObject):
+    """NSMenuDelegate that refreshes app state when the menu is opened."""
+
+    def initWithApp_(self, app):
+        self = objc.super(MenuDelegate, self).init()
+        if self is None:
+            return None
+        self.app = app
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def menuWillOpen_(self, menu):
+        self.app._update_state()
 
 
 class _CoffeeLinkTarget(NSObject):
@@ -2220,7 +2235,7 @@ def find_timew_path():
 
 
 TIMEW = find_timew_path()
-REFRESH_INTERVAL = 5  # seconds
+REFRESH_INTERVAL = 300  # seconds (5 minutes)
 
 
 def _init_timewarrior():
@@ -2370,8 +2385,8 @@ def get_intervals_for_date(day_date):
 
 def get_today_intervals():
     """Return today's tracked intervals as list of dicts with local start/end times."""
-    from datetime import date
-    today_str = date.today().strftime("%Y-%m-%d")
+    today = date.today()
+    today_str = today.strftime("%Y-%m-%d")
     out = run("export", today_str)
     if not out:
         return []
@@ -2407,11 +2422,12 @@ def get_today_intervals():
         else:
             end_local = datetime.now(local_tz)
 
-        intervals.append({
-            "start": start_local,
-            "end": end_local,
-            "tags": item.get("tags", [])
-        })
+        if start_local.date() == today or end_local.date() == today:
+            intervals.append({
+                "start": start_local,
+                "end": end_local,
+                "tags": item.get("tags", [])
+            })
 
     return intervals
 
@@ -2675,6 +2691,10 @@ def _set_item_title(item, tag, time_suffix=None):
     suffix in secondaryLabelColor.  Falls back to a plain title on any error.
     """
     if not time_suffix:
+        try:
+            item._menuitem.setAttributedTitle_(None)
+        except Exception:
+            pass
         item.title = tag
         return
     try:
@@ -3040,6 +3060,7 @@ class TimeBar(rumps.App):
         _init_timewarrior()
         self._tag_items = {}
         self._active_tags_cache = set()
+        self._last_date = date.today()
         self._config = load_config()
         self._locked_active_tags = set()
         self._current_progress_icon_path = None
@@ -3071,6 +3092,13 @@ class TimeBar(rumps.App):
             "com.apple.screenIsUnlocked",
             None
         )
+
+        self._menu_delegate = MenuDelegate.alloc().initWithApp_(self)
+        try:
+            if hasattr(self, "_menu") and hasattr(self._menu, "_menu"):
+                self._menu._menu.setDelegate_(self._menu_delegate)
+        except Exception as e:
+            print(f"Error attaching menu delegate: {e}")
 
         self._build_menu()
         self._update_state()
@@ -3496,6 +3524,11 @@ class TimeBar(rumps.App):
     def _update_state(self):
         active, duration = get_active_tracking_info()
 
+        today = date.today()
+        date_changed = getattr(self, "_last_date", None) != today
+        if date_changed:
+            self._last_date = today
+
         # Fetch today's intervals once; reused for tag labels, timeline, and
         # workday progress to avoid redundant subprocess calls.
         try:
@@ -3503,7 +3536,7 @@ class TimeBar(rumps.App):
         except Exception:
             intervals = []
 
-        if active != getattr(self, "_active_tags_cache", None):
+        if date_changed or active != getattr(self, "_active_tags_cache", None):
             self._active_tags_cache = active
             self._build_menu(active_tags=active)
         else:
@@ -3558,7 +3591,7 @@ class TimeBar(rumps.App):
                         suffix = None
                     _set_item_title(item, tag, suffix)
                 else:
-                    item.title = tag
+                    _set_item_title(item, tag)
 
         workday_hours = self._config.get("workday_hours", 7.5)
 

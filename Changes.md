@@ -1,5 +1,9 @@
 # What's New in Arête
 
+## 1.0.17
+- Don't poll for updates every 5 seconds, rather update on icon click.
+- Update main circle and project name every 5 minutes.
+
 ## 1.0.16
 - Show independent time since tag was started when tracking multiple tags.
 - Configurable display of cumulative time today per tag in main view.

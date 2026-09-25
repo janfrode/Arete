@@ -678,3 +678,34 @@ class TestTagDurationToday:
         ivs = [self._iv(0, 30, ["work"]), self._iv(30, 60, ["meeting", "work"])]
         assert arete._tag_duration_today("work", ivs) == 60 * 60
         assert arete._tag_duration_today("meeting", ivs) == 30 * 60
+
+
+class TestGetTodayIntervals:
+    def test_filters_adjacent_day_intervals(self, monkeypatch):
+        mock_data = json.dumps([
+            {"start": "20260330T100000Z", "end": "20260330T110000Z", "tags": ["yesterday_tag"]},
+            {"start": "20260331T090000Z", "end": "20260331T100000Z", "tags": ["today_tag"]},
+        ])
+        monkeypatch.setattr(arete, "run", lambda *args: mock_data)
+        
+        from datetime import date
+        class FixedDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 3, 31)
+
+        monkeypatch.setattr(arete, "date", FixedDate)
+
+        intervals = arete.get_today_intervals()
+        assert len(intervals) == 1
+        assert "today_tag" in intervals[0]["tags"]
+        assert "yesterday_tag" not in intervals[0]["tags"]
+
+
+class TestSetItemTitle:
+    def test_clears_attributed_title_when_no_suffix(self):
+        mock_item = MagicMock()
+        mock_item._menuitem = MagicMock()
+        arete._set_item_title(mock_item, "dev", None)
+        assert mock_item.title == "dev"
+        mock_item._menuitem.setAttributedTitle_.assert_called_once_with(None)
