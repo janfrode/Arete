@@ -196,6 +196,47 @@ def _parse_intervals(out):
     return intervals
 
 
+def _clip_to_range(intervals, start_date, end_date):
+    """Split intervals at local midnight and clip them to [start_date, end_date].
+
+    An interval spanning several days becomes one piece per day, so each day's
+    timeline row and totals only contain the time actually tracked that day.
+    Each piece keeps the original id/tags/annotation.
+    """
+    tz = local_tz()
+    lo = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+    nxt = end_date + timedelta(days=1)
+    hi = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
+
+    pieces = []
+    for inv in intervals:
+        cur = max(inv["start"], lo)
+        stop = min(inv["end"], hi)
+        if inv["start"] >= lo and inv["end"] <= hi and \
+                inv["start"].date() == inv["end"].date():
+            pieces.append(inv)
+            continue
+        while cur < stop:
+            d = cur.date() + timedelta(days=1)
+            midnight = datetime(d.year, d.month, d.day, tzinfo=tz)
+            piece_end = min(stop, midnight)
+            pieces.append({**inv, "start": cur, "end": piece_end,
+                           "duration": (piece_end - cur).total_seconds()})
+            cur = piece_end
+    return pieces
+
+
+def _hour_bounds(intervals):
+    """Return (hour_start, hour_end) covering all (day-split) intervals."""
+    hour_start = min(inv["start"].hour for inv in intervals)
+    hour_end = max(
+        24 if inv["end"].date() > inv["start"].date()
+        else inv["end"].hour + (1 if inv["end"].minute or inv["end"].second else 0)
+        for inv in intervals
+    )
+    return hour_start, hour_end
+
+
 def export_intervals(range_arg):
     """Return list of interval dicts for a timew range keyword (e.g. ':day')."""
     return _parse_intervals(run_timew("export", range_arg))
@@ -1942,7 +1983,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
     start_str = start_date.strftime("%Y-%m-%dT00:00:00")
     end_str    = (end_date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
     out = run_timew("export", start_str, "-", end_str)
-    intervals = _parse_intervals(out)
+    intervals = _clip_to_range(_parse_intervals(out), start_date, end_date)
 
     # Apply tag filter — keep only intervals that contain at least one
     # selected tag, and trim each interval's tag list to selected tags only.
@@ -2003,9 +2044,7 @@ def build_report_view(period, offset, on_navigate, workday_hours=7.5,
 
     # --- Compute tight hour bounds across all intervals in this view ---
     if intervals:
-        hour_start = min(inv["start"].hour for inv in intervals)
-        hour_end   = max(inv["end"].hour + (1 if inv["end"].minute or inv["end"].second else 0)
-                         for inv in intervals)
+        hour_start, hour_end = _hour_bounds(intervals)
         # Also include "now" if today is in the view and tracking is active
         now_dt = datetime.now().astimezone()
         if any(r[1] == date.today() for r in rows):
@@ -2274,7 +2313,7 @@ def build_custom_report_view(start_date, end_date, on_show,
     start_str = start_date.strftime("%Y-%m-%dT00:00:00")
     end_str   = (end_date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
     out = run_timew("export", start_str, "-", end_str)
-    intervals = _parse_intervals(out)
+    intervals = _clip_to_range(_parse_intervals(out), start_date, end_date)
 
     if filter_tags is not None:
         filtered = []
@@ -2313,9 +2352,7 @@ def build_custom_report_view(start_date, end_date, on_show,
     target_secs = _count_weekdays(start_date, end_date) * WORKDAY_SECS
 
     if intervals:
-        hour_start = min(inv["start"].hour for inv in intervals)
-        hour_end   = max(inv["end"].hour + (1 if inv["end"].minute or inv["end"].second else 0)
-                         for inv in intervals)
+        hour_start, hour_end = _hour_bounds(intervals)
         now_dt = datetime.now().astimezone()
         if any(r[1] == today for r in rows):
             hour_end = max(hour_end, now_dt.hour + 1)
@@ -3526,7 +3563,7 @@ class ReportWindowController(NSObject):
         start_str = start_date.strftime("%Y-%m-%dT00:00:00")
         end_str   = (end_date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
         out = run_timew("export", start_str, "-", end_str)
-        intervals = _parse_intervals(out)
+        intervals = _clip_to_range(_parse_intervals(out), start_date, end_date)
 
         filter_tags = self._filter_tags
         if filter_tags is not None:
@@ -3570,11 +3607,7 @@ class ReportWindowController(NSObject):
                 d += timedelta(days=1)
 
         if intervals:
-            hour_start = min(inv["start"].hour for inv in intervals)
-            hour_end   = max(
-                inv["end"].hour + (1 if inv["end"].minute or inv["end"].second else 0)
-                for inv in intervals
-            )
+            hour_start, hour_end = _hour_bounds(intervals)
             hour_start = max(0, hour_start)
             hour_end   = min(24, hour_end)
             if hour_end <= hour_start:

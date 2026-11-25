@@ -248,6 +248,42 @@ class TestParseIntervals:
         assert result[0]["annotation"] == ""
 
 
+class TestClipToRange:
+    """_clip_to_range() splits intervals at local midnight."""
+
+    def _inv(self, start, end):
+        return {"start": start, "end": end, "tags": ["t"], "id": 1,
+                "annotation": "", "duration": (end - start).total_seconds()}
+
+    def test_midnight_spanning_interval_is_split(self):
+        tz = timereport.local_tz()
+        s = datetime(2024, 3, 4, 20, 59, 22, tzinfo=tz)
+        e = datetime(2024, 3, 5, 0, 55, 0, tzinfo=tz)
+        out = timereport._clip_to_range([self._inv(s, e)],
+                                        s.date(), e.date())
+        assert len(out) == 2
+        assert out[0]["start"] == s
+        assert out[0]["end"].date() == e.date() and out[0]["end"].hour == 0
+        assert out[1]["start"].hour == 0 and out[1]["end"] == e
+        assert sum(p["duration"] for p in out) == (e - s).total_seconds()
+
+    def test_clipped_to_requested_day(self):
+        tz = timereport.local_tz()
+        s = datetime(2024, 3, 4, 20, 0, 0, tzinfo=tz)
+        e = datetime(2024, 3, 5, 1, 0, 0, tzinfo=tz)
+        out = timereport._clip_to_range([self._inv(s, e)],
+                                        e.date(), e.date())
+        assert len(out) == 1
+        assert out[0]["duration"] == 3600.0
+
+    def test_same_day_interval_untouched(self):
+        tz = timereport.local_tz()
+        s = datetime(2024, 3, 4, 9, 0, 0, tzinfo=tz)
+        e = datetime(2024, 3, 4, 10, 0, 0, tzinfo=tz)
+        iv = self._inv(s, e)
+        assert timereport._clip_to_range([iv], s.date(), s.date()) == [iv]
+
+
 class TestDateRangeFor:
     """date_range_for(period, offset) — freeze today via monkeypatching."""
 
@@ -700,6 +736,25 @@ class TestGetTodayIntervals:
         assert len(intervals) == 1
         assert "today_tag" in intervals[0]["tags"]
         assert "yesterday_tag" not in intervals[0]["tags"]
+
+    def test_midnight_spanning_interval_is_clipped_to_today(self, monkeypatch):
+        tz = datetime.now().astimezone().tzinfo
+        today = datetime.now(tz).date()
+        start = datetime(today.year, today.month, today.day, tzinfo=tz) - timedelta(hours=3, minutes=1)
+        end = datetime(today.year, today.month, today.day, tzinfo=tz) + timedelta(minutes=55)
+        fmt = "%Y%m%dT%H%M%SZ"
+        mock_data = json.dumps([{
+            "start": start.astimezone(timezone.utc).strftime(fmt),
+            "end": end.astimezone(timezone.utc).strftime(fmt),
+            "tags": ["night"],
+        }])
+        monkeypatch.setattr(arete, "run", lambda *args: mock_data)
+
+        intervals = arete.get_today_intervals()
+        assert len(intervals) == 1
+        assert arete._tag_duration_today("night", intervals) == 55 * 60
+        # Live session time still counts from the real start
+        assert arete._session_start_for_tag("night", intervals) == start
 
 
 class TestSetItemTitle:

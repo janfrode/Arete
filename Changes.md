@@ -1,5 +1,8 @@
 # What's New in Arête
 
+## 1.0.18
+- Correct time display of task spanning over 2 days to show correctly in applet and logbook.
+- 
 ## 1.0.17
 - Don't poll for updates every 5 seconds, rather update on icon click.
 - Update main circle and project name every 5 minutes.

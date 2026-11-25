@@ -2334,6 +2334,27 @@ def get_recent_tags(range_arg=":month"):
     return parse_tags_output(run("tags", *args))
 
 
+def _clip_to_day(intervals, day_date):
+    """Clip intervals to local midnight boundaries of *day_date*.
+
+    Intervals that cross midnight only contribute the part inside the day.
+    Clipped pieces keep the real start in "full_start" so the live session
+    time of an active task is still measured from when it really began.
+    """
+    tz = datetime.now().astimezone().tzinfo
+    lo = datetime(day_date.year, day_date.month, day_date.day, tzinfo=tz)
+    hi = lo + timedelta(days=1)
+    clipped = []
+    for iv in intervals:
+        start = max(iv["start"], lo)
+        end = min(iv["end"], hi)
+        if start >= end:
+            continue
+        clipped.append({**iv, "start": start, "end": end,
+                        "full_start": iv["start"]})
+    return clipped
+
+
 def get_intervals_for_date(day_date):
     """Return tracked intervals for any date (date/datetime) as list of dicts with local start/end times."""
     date_str = day_date.strftime("%Y-%m-%d")
@@ -2372,15 +2393,14 @@ def get_intervals_for_date(day_date):
         else:
             end_local = datetime.now(local_tz)
 
-        # Make sure the interval belongs to the requested day (sometimes timew exports adjacent days)
-        if start_local.date() == day_date or end_local.date() == day_date:
-            intervals.append({
-                "start": start_local,
-                "end": end_local,
-                "tags": item.get("tags", [])
-            })
+        intervals.append({
+            "start": start_local,
+            "end": end_local,
+            "tags": item.get("tags", [])
+        })
 
-    return intervals
+    # Only the part of each interval inside the requested day counts
+    return _clip_to_day(intervals, day_date)
 
 
 def get_today_intervals():
@@ -2422,14 +2442,13 @@ def get_today_intervals():
         else:
             end_local = datetime.now(local_tz)
 
-        if start_local.date() == today or end_local.date() == today:
-            intervals.append({
-                "start": start_local,
-                "end": end_local,
-                "tags": item.get("tags", [])
-            })
+        intervals.append({
+            "start": start_local,
+            "end": end_local,
+            "tags": item.get("tags", [])
+        })
 
-    return intervals
+    return _clip_to_day(intervals, today)
 
 
 class MenubarTimelineView(NSView):
@@ -2663,7 +2682,7 @@ def _session_start_for_tag(tag, intervals):
     # The last interval is the open/active one.
     if tag not in sorted_ivs[-1]["tags"]:
         return None
-    session_start = sorted_ivs[-1]["start"]
+    session_start = sorted_ivs[-1].get("full_start", sorted_ivs[-1]["start"])
     for i in range(len(sorted_ivs) - 2, -1, -1):
         prev = sorted_ivs[i]
         curr = sorted_ivs[i + 1]
@@ -2672,7 +2691,7 @@ def _session_start_for_tag(tag, intervals):
             break
         if tag not in prev["tags"]:
             break
-        session_start = prev["start"]
+        session_start = prev.get("full_start", prev["start"])
     return session_start
 
 
